@@ -1,5 +1,10 @@
 using System.Text.Json.Nodes;
 
+if (Environment.GetEnvironmentVariable("FAKE_DSH_EXIT_BEFORE_REQUEST") == "1")
+{
+    throw new InvalidOperationException("Synthetic DSH startup failure before initialize.");
+}
+
 while (Console.ReadLine() is { } line)
 {
     var request = JsonNode.Parse(line)?.AsObject()

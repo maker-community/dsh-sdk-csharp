@@ -22,6 +22,7 @@ This project drives the official `dsh` runtime; it does not reimplement or fork 
 
 The NuGet package ID is `DeepSeek.Harness.Sdk`; the GitHub repository name is `dsh-sdk-csharp` so the target language and ecosystem are easy to discover. Both names are subject to change before the first stable release.
 The SDK protocol does not expose a Session-list method; persist Session IDs in the calling application when it needs to resume or present prior Sessions.
+The default model ID is `deepseek-flash`, DeepSeek's current canonical Flash API model ID. DSH's SDK protocol still requires provider and model fields in `initialize`; applications normally leave the provider at `deepseek-official` and use this model default.
 
 ## Requirements
 
@@ -46,7 +47,7 @@ var options = new DeepSeekHarnessOptions
     DshHome = Path.GetFullPath(".dsh-home"),
     WorkingDirectory = Path.GetFullPath("./workspace"),
     Provider = "deepseek-official",
-    Model = "deepseek-v4-flash",
+    Model = "deepseek-flash",
 };
 
 await using var harness = new DeepSeekHarnessClient(options);

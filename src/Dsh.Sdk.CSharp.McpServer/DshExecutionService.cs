@@ -1,4 +1,5 @@
 using DeepSeek.Harness.Sdk;
+using Microsoft.Extensions.Logging;
 
 namespace Dsh.Sdk.CSharp.McpServer;
 
@@ -8,18 +9,27 @@ public sealed class DshExecutionService : IDshExecutionService, IAsyncDisposable
     private readonly McpBridgeSettings _settings;
     private readonly string _sessionPrefix = $"dsh-mcp-{Guid.NewGuid():N}";
 
-    public DshExecutionService(McpBridgeSettings settings)
+    public DshExecutionService(McpBridgeSettings settings, ILogger<DshExecutionService> logger)
     {
         _settings = settings;
         Directory.CreateDirectory(settings.DshWorkspace);
-        _client = new DeepSeekHarnessClient(new DeepSeekHarnessOptions
+        var dshOptions = new DeepSeekHarnessOptions
         {
             DshExecutable = settings.DshExecutable,
             DshHome = settings.DshHome,
             Profile = settings.DshProfile,
             ProcessWorkingDirectory = settings.DshWorkspace,
             WorkingDirectory = settings.DshWorkspace,
-        });
+        };
+        logger.LogInformation(
+            "DSH MCP bridge configuration: executable={Executable}, home={DshHome}, profile={Profile}, workspace={Workspace}, provider={Provider}, model={Model}",
+            settings.DshExecutable,
+            settings.DshHome,
+            settings.DshProfile,
+            settings.DshWorkspace,
+            dshOptions.Provider,
+            dshOptions.Model);
+        _client = new DeepSeekHarnessClient(dshOptions);
     }
 
     public async Task<HarnessRunResult> RunAsync(

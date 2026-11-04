@@ -4,6 +4,8 @@
 
 本项目通过子进程启动官方 `dsh --profile sdk`，并使用其基于标准输入/输出的 JSON-RPC 2.0 行协议驱动任务；它不是用 C# 重写的 Harness。
 
+SDK 默认使用 `deepseek-official` Provider 和规范模型 ID `deepseek-flash`。DSH 协议初始化仍要求显式发送 provider/model 字段，但 MCP 服务不重复提供这两个配置项。
+
 > **非官方、早期版本：** 本 SDK 由社区维护，不代表 DeepSeek 官方。DeepSeek Harness 目前处于 Developer Preview，SDK 协议尚无版本协商或兼容性承诺。部署时请固定并验证 DSH 版本。
 
 仓库名采用 `dsh-sdk-csharp`，便于从名称辨认目标生态；计划使用的 NuGet 包 ID 为 `DeepSeek.Harness.Sdk`。稳定版发布前，这些名称仍可能调整。
@@ -44,7 +46,7 @@ var harness = new DeepSeekHarnessClient(new DeepSeekHarnessOptions
     DshHome = Path.GetFullPath(".dsh-home"),
     WorkingDirectory = Path.GetFullPath("./workspace"),
     Provider = "deepseek-official",
-    Model = "deepseek-v4-flash",
+    Model = "deepseek-flash",
 });
 
 await using (harness)
@@ -54,6 +56,8 @@ await using (harness)
     Console.WriteLine($"Session: {result.SessionId}; finish: {result.FinishReason}");
 }
 ```
+
+SDK 默认模型 ID 为 `deepseek-flash`，这是 DeepSeek 当前规范的 Flash API 模型名。DSH SDK 协议仍要求在 `initialize` 中发送 provider 和 model；通常保留默认 provider `deepseek-official` 即可。
 
 ## 命令行 Demo 与官方 CLI
 
@@ -79,6 +83,23 @@ dotnet run --project .\examples\ConsoleChat\ConsoleChat.csproj -- `
 桌面版 Windows 可使用随安装提供的 `dsh.cmd`，SDK 会通过 `cmd.exe` 启动它。凭据由指定的 DSH home 管理；Demo 不会要求输入或打印 API Key。
 
 也可以在 VS Code 中选择 **Terminal → Run Task → DSH C# SDK ConsoleChat**；它会为 Demo 创建持久工作目录。
+
+### MCP 桥接服务的 DSH_HOME
+
+`DSH_HOME` 是 DSH 数据目录，通常为 `C:\Users\<用户名>\.dsh` 或 `$HOME/.dsh`，其中包含 profiles、凭据、设置和会话记录。MCP 服务从自己的配置读取该值，并将绝对路径传给 DSH 子进程。若 MCP 服务和 ConsoleChat 以同一个 Windows 用户运行且使用同一个 `DSH_HOME`，两者读取的是同一份 DSH 配置。`DSH_HOME` 不负责选择 `dsh.cmd`；可执行文件路径由 `DSH_EXECUTABLE` 单独指定。
+
+ConsoleChat 会显式传入 `DSH_EXECUTABLE`、`DSH_HOME`、`DSH_PROFILE` 和 `DSH_WORKSPACE`；MCP Host 则有自己的环境变量和 PATH。出现“管道正在被关闭”通常表示 DSH 子进程在 SDK 握手前退出。请查看 MCP 服务启动时输出的 executable/home/profile/workspace，再查看新版 SDK 错误中附带的子进程 stderr。当前 `appsettings.json` 默认 profile 是 `sdk`；若要与 ConsoleChat 完全一致，可在启动 MCP 服务的环境中设置 `DSH_PROFILE=dsh-sdk-csharp-chat`。
+
+本机可用以下 PowerShell 设置与 ConsoleChat 相同的 DSH 启动配置：
+
+```powershell
+$env:DSH_EXECUTABLE = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+$env:DSH_HOME = "$HOME\.dsh"
+$env:DSH_PROFILE = "dsh-sdk-csharp-chat"
+$env:DSH_WORKSPACE = "$HOME\.dsh\workspaces\dsh-mcp"
+```
+
+设置必须在启动 MCP 服务的那个终端/进程中生效；服务运行后再改环境变量不会影响已启动的进程。
 
 ## Streamable HTTP MCP 服务桥接
 

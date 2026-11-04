@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj" />
     <ProjectReference Include="..\..\src\Dsh.Sdk.CSharp\Dsh.Sdk.CSharp.csproj" />
     <ProjectReference Include="..\FakeDshRuntime\FakeDshRuntime.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

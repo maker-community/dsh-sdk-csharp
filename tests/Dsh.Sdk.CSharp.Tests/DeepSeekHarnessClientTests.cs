@@ -137,6 +137,15 @@ public sealed class DeepSeekHarnessClientTests
     }
 
     [Fact]
+    public void Options_UseOfficialDeepSeekDefaults()
+    {
+        var options = new DeepSeekHarnessOptions();
+
+        Assert.Equal("deepseek-official", options.Provider);
+        Assert.Equal("deepseek-flash", options.Model);
+    }
+
+    [Fact]
     public async Task StartAndRunAsync_SendConfiguredRouteAndOrderedImageBlocks()
     {
         var capturePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-capture-{Guid.NewGuid():N}.jsonl");
@@ -738,6 +747,18 @@ public sealed class DeepSeekHarnessClientTests
             new Dictionary<string, string?> { ["FAKE_DSH_EXIT_ON_QUERY"] = "1" }));
 
         await Assert.ThrowsAsync<HarnessTransportException>(() => client.RunAsync("Exit now."));
+    }
+
+    [Fact]
+    public async Task StartAsync_IncludesChildStderrWhenPipeClosesBeforeHandshake()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?> { ["FAKE_DSH_EXIT_BEFORE_REQUEST"] = "1" }));
+
+        var exception = await Assert.ThrowsAsync<HarnessTransportException>(() => client.StartAsync());
+
+        Assert.Contains("The DSH runtime exited", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Synthetic DSH startup failure before initialize.", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

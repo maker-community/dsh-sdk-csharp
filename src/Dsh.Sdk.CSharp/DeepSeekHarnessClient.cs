@@ -466,16 +466,16 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         bool allowClosing = false)
     {
         ThrowIfClosed(allowClosing);
-        if (_transportFailure is { } transportFailure)
-        {
-            throw new HarnessTransportException("The Harness stdio transport is closed.", transportFailure);
-        }
-
         var process = _process ?? throw new InvalidOperationException(
             "The Harness process has not been started.");
+        if (_transportFailure is { } transportFailure)
+        {
+            throw await CreateTransportClosedExceptionAsync(process, transportFailure).ConfigureAwait(false);
+        }
+
         if (HasExited(process))
         {
-            throw CreateTransportClosedException(process);
+            throw await CreateTransportClosedExceptionAsync(process).ConfigureAwait(false);
         }
 
         var id = Interlocked.Increment(ref _nextRequestId).ToString(
@@ -1131,8 +1131,31 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         catch (Exception exception) when (
             exception is IOException or ObjectDisposedException or InvalidOperationException)
         {
+            var process = _process;
+            if (process is not null && !HasExited(process))
+            {
+                using var exitProbe = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                try
+                {
+                    await process.WaitForExitAsync(exitProbe.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            var diagnostic = string.Empty;
+            if (process is not null && HasExited(process))
+            {
+                var exitCode = TryGetExitCode(process)?.ToString() ?? "unknown";
+                var stderr = string.Join(Environment.NewLine, _stderrTail);
+                diagnostic = string.IsNullOrWhiteSpace(stderr)
+                    ? $" DSH exited with code {exitCode}."
+                    : $" DSH exited with code {exitCode}. Recent stderr:{Environment.NewLine}{stderr}";
+            }
+
             var transportException = new HarnessTransportException(
-                "Could not write a JSON-RPC frame to the Harness process.", exception);
+                $"Could not write a JSON-RPC frame to the Harness process.{diagnostic}", exception);
             FailTransport(transportException);
             throw transportException;
         }
@@ -1251,6 +1274,28 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         }
 
         return new HarnessTransportException(message);
+    }
+
+    private async Task<HarnessTransportException> CreateTransportClosedExceptionAsync(
+        Process process,
+        Exception? innerException = null)
+    {
+        if (HasExited(process) && _stderrTask is { } stderrTask)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            try
+            {
+                await stderrTask.WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        var closedException = CreateTransportClosedException(process);
+        return innerException is null
+            ? closedException
+            : new HarnessTransportException(closedException.Message, innerException);
     }
 
     private static bool HasExited(Process process)

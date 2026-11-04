@@ -13,7 +13,11 @@ The first version exposes one tool, `dsh_run`, which runs a prompt against the c
 
 The MCP service starts DSH lazily on the first `dsh_run` call. MCP calls share a DSH process and its default Session for the lifetime of the service. An optional `conversationId` selects a separate Session for calls that use the same value. Session ids are scoped to this service process; automatic Session restore after an MCP service restart is not implemented.
 
-The service launches the configured local DSH executable through the C# SDK; it does not call a remote DSH service. The SDK uses its default provider/model route and supplies the protocol-required `provider` and `model` fields during initialization. The MCP service has no separate settings for these values; DSH credentials and profile configuration remain in the configured local DSH home.
+The service launches the configured local DSH executable through the C# SDK; it does not call a remote DSH service. The SDK uses its default route (`deepseek-official` / `deepseek-flash`) and supplies the protocol-required `provider` and `model` fields during initialization. The MCP service has no separate settings for these values; DSH credentials and profile configuration remain in the configured local DSH home.
+
+`DSH_HOME` selects the DSH data directory, normally `<Windows user profile>\.dsh` or `$HOME/.dsh`. It contains the profiles, credentials, settings, and Session storage. The bridge resolves it from configuration and passes the absolute path to the child DSH process. If the MCP host and ConsoleChat run as the same OS user and use the same DSH_HOME, they read the same DSH configuration. `DSH_HOME` does not select the CLI executable; configure `DSH_EXECUTABLE` separately.
+
+The ConsoleChat example passes `DSH_EXECUTABLE`, `DSH_HOME`, `DSH_PROFILE`, and `DSH_WORKSPACE` explicitly. The MCP host has its own environment/PATH. A closed stdin pipe means the DSH child exited before accepting the SDK handshake; use the bridge startup log to compare the resolved executable, home, profile, and workspace, then inspect the child stderr included by the latest SDK build.
 
 ## Configure and run
 
@@ -25,19 +29,62 @@ PowerShell example:
 $env:MCP_API_KEY = [Convert]::ToBase64String(
     [Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:ASPNETCORE_URLS = "http://127.0.0.1:8000"
-$env:DSH_EXECUTABLE = "C:\path\to\dsh.cmd"
+$env:DSH_EXECUTABLE = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 $env:DSH_HOME = "$HOME\.dsh"
-$env:DSH_PROFILE = "sdk"
+$env:DSH_PROFILE = "dsh-sdk-csharp-chat"
 $env:DSH_WORKSPACE = "$HOME\workspaces\dsh-mcp"
 
 dotnet run --project .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj
 ```
+
+The service discovers DSH from the current process `PATH` when `DSH_EXECUTABLE` is not set. On Windows it checks `dsh.cmd`, `dsh.bat`, and `dsh.exe`, then the standard DeepSeek Desktop CLI installation path under `%LOCALAPPDATA%`; on other platforms it checks `dsh`. If DSH is installed elsewhere, set `DSH_EXECUTABLE` to its full path (for example, `C:\path\to\dsh.cmd`).
+
+The bridge reads `DSH_HOME`, `DSH_PROFILE`, and `DSH_WORKSPACE` from its own ASP.NET Core configuration, then passes them to the child DSH process. If `DSH_HOME` is omitted, the bridge explicitly uses `<current Windows user profile>\.dsh`; it is not inferred from the ConsoleChat process. The checked-in `appsettings.json` selects profile `sdk`. If ConsoleChat works with a different profile or DSH installation, set the bridge's `DSH_PROFILE` and `DSH_EXECUTABLE` to those exact working values, for example:
+
+```powershell
+$env:DSH_EXECUTABLE = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+$env:DSH_HOME = "$HOME\.dsh"
+$env:DSH_PROFILE = "dsh-sdk-csharp-chat"
+$env:DSH_WORKSPACE = "$HOME\.dsh\workspaces\dsh-mcp"
+```
+
+`DSH_EXECUTABLE` and `DSH_PROFILE` are independent: matching the home alone does not make the MCP bridge use the same CLI/profile as ConsoleChat. When DSH exits before handshake, the C# SDK reports its exit code and recent stderr to help identify an invalid executable, profile, or startup failure.
 
 The API key is required and must be at least 32 characters. The service never logs or returns it. Every request to `/mcp` must include:
 
 ```http
 Authorization: Bearer <MCP_API_KEY>
 ```
+
+### VS Code HTTP MCP client configuration
+
+This project exposes Streamable HTTP at `/mcp`; VS Code connects to the running ASP.NET Core service as an HTTP client. The workspace [`.vscode/mcp.json`](../../.vscode/mcp.json) follows this pattern. Start the service separately and configure DSH variables on that service process; changing variables in a different terminal does not affect an already-running process.
+
+```json
+{
+  "servers": {
+    "dsh-csharp-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:dshMcpApiKey}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "dshMcpApiKey",
+      "description": "Local DSH MCP API key",
+      "password": true
+    }
+  }
+}
+```
+
+Enter the same API key configured for the service when VS Code prompts. For Xiaozhi Server, run the bridge as an HTTP service and configure its MCP client to use `https://<host>/mcp` with the bearer header.
+
+The bridge logs the resolved DSH executable, home, profile, workspace, provider, and model at startup. These values contain no API key. If DSH exits before the SDK handshake, the SDK error includes the child exit code and recent stderr.
 
 `/health` is unauthenticated and returns only a basic liveness status. The server rejects browser `Origin` headers unless their exact origin is included in `MCP_ALLOWED_ORIGINS` (comma- or semicolon-separated). Keep the MCP endpoint on a private network or behind HTTPS and a trusted reverse proxy; do not expose plain HTTP to the public internet.
 
@@ -75,7 +122,7 @@ In VS Code, start `dsh-csharp-local` from the MCP server list and enter the same
 | `MCP_API_KEY` | Required | Shared bearer API key; generate a random secret of at least 32 characters |
 | `MCP_ALLOWED_ORIGINS` | Empty | Exact browser origins allowed to call the MCP endpoint; non-browser requests without `Origin` are allowed |
 | `ASPNETCORE_URLS` | ASP.NET Core default | Listening address. Prefer loopback/private binding behind TLS termination |
-| `DSH_EXECUTABLE` | `dsh` | DSH executable path; on Windows Desktop, use the bundled `dsh.cmd` |
+| `DSH_EXECUTABLE` | Discovered from `PATH` or standard Windows Desktop install | Optional DSH executable override; Windows searches `dsh.cmd`, `dsh.bat`, then `dsh.exe` |
 | `DSH_HOME` | DSH default home | DSH home containing the selected profile, credentials, and persistence |
 | `DSH_PROFILE` | `sdk` | Profile that serves the SDK JSON-RPC runtime |
 | `DSH_WORKSPACE` | Service working directory | Workspace available to DSH tools |

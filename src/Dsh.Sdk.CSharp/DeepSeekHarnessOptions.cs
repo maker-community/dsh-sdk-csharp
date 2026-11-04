@@ -27,8 +27,8 @@ public sealed class DeepSeekHarnessOptions
     /// <summary>Provider route for SDK-created agents.</summary>
     public string Provider { get; init; } = "deepseek-official";
 
-    /// <summary>Model name for SDK-created agents.</summary>
-    public string Model { get; init; } = "deepseek-v4-flash";
+    /// <summary>Model name for SDK-created agents. Defaults to DeepSeek's current canonical Flash API model ID.</summary>
+    public string Model { get; init; } = "deepseek-flash";
 
     /// <summary>Optional provider-specific reasoning effort identifier.</summary>
     public string? ReasoningEffort { get; init; }
