@@ -7,6 +7,7 @@
 > **非官方、早期版本：** 本 SDK 由社区维护，不代表 DeepSeek 官方。DeepSeek Harness 目前处于 Developer Preview，SDK 协议尚无版本协商或兼容性承诺。部署时请固定并验证 DSH 版本。
 
 仓库名采用 `dsh-sdk-csharp`，便于从名称辨认目标生态；计划使用的 NuGet 包 ID 为 `DeepSeek.Harness.Sdk`。稳定版发布前，这些名称仍可能调整。
+官方 SDK stdio 协议没有会话列表方法；应用若要恢复或展示旧会话，应自行保存 Session ID。
 
 ## 当前能力
 
@@ -16,6 +17,7 @@
 - `RunAsync` 在任务到达 Session inbox 并回到 idle 后返回
 - 支持 prompt、resume、wait 和工作目录查询/切换
 - 可订阅运行时通知
+- 支持一次性操作审批和原生用户提问回调
 - 优雅关闭并回收 DSH 子进程
 - 运行库无第三方依赖
 
@@ -107,6 +109,28 @@ await harness.WaitForSessionAsync("job-42");
 Console.WriteLine($"已入队消息：{messageId}");
 ```
 
+### 审批与用户提问
+
+操作审批需显式开启。只有返回 `AllowOnce` 才会批准**当前这一次操作**；SDK 不会默认自动授权：
+
+```csharp
+var options = new DeepSeekHarnessOptions
+{
+    ApprovalRequests = true,
+    OnApprovalRequest = async (request, cancellationToken) =>
+    {
+        Console.WriteLine(
+            $"是否仅允许本次 {request.ToolName} 操作？{request.Reason ?? string.Empty}");
+        var answer = await Console.In.ReadLineAsync(cancellationToken);
+        return string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase)
+            ? ApprovalRequestDecision.AllowOnce
+            : ApprovalRequestDecision.Reject;
+    },
+};
+```
+
+设置 `OnUserQuestion` 可处理 `ask_user_question` 和计划审阅。回调收到的每个问题都有原始 ID，必须逐个回答；用户取消时返回 `SdkUserQuestionResponse.Dismiss()`。只有配置了回调，SDK 才会向 DSH 声明支持用户提问。DSH 取消问题时会取消回调的 `CancellationToken`，并丢弃迟到的答案。
+
 ## 重要边界
 
 - DSH 的 stdout 专用于 JSON-RPC 帧；SDK profile 不应把普通日志写入 stdout。
@@ -114,7 +138,7 @@ Console.WriteLine($"已入队消息：{messageId}");
 - 如果旧版运行时不支持 `session/query`，`RunAsync` 会回退到 `session/prompt`，等待对应的收件箱回执和 idle 状态。回退路径不提供原生斜杠命令路由。
 - 请求超时或调用方取消只停止等待，不会取消或回滚已被 DSH 接受的任务。
 - 原始订阅会收到运行时内各个 Session 的通知；高层 `RunAsync` 仅收集目标 Session 和发现的子 Agent。
-- 当前未实现 approval 和交互式 user-question 回调。遇到未支持的服务端请求时，客户端会拒绝该请求。
+- 未支持的服务端请求会被拒绝。操作审批必须显式启用，且只对当前操作生效；无效决定或回调异常会返回协议错误，保持 fail-closed。原生用户提问需配置 `OnUserQuestion`，除非 DSH 组合本身提供了回答器。
 - SDK 是本地进程客户端，不是远程服务。若要让其他服务通过网络提交工作，应在外层服务实现认证、授权、配额和审计。
 
 ## 构建和测试

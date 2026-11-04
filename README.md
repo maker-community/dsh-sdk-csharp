@@ -16,10 +16,12 @@ This project drives the official `dsh` runtime; it does not reimplement or fork 
 - `RunAsync` collects the matching session activity through its idle transition
 - Low-level prompt, resume, wait, and working-directory operations
 - Independent asynchronous notification subscriptions
+- One-shot operation approvals and native user-question callbacks
 - Graceful protocol shutdown and child-process cleanup
 - No third-party runtime dependencies
 
 The NuGet package ID is `DeepSeek.Harness.Sdk`; the GitHub repository name is `dsh-sdk-csharp` so the target language and ecosystem are easy to discover. Both names are subject to change before the first stable release.
+The SDK protocol does not expose a Session-list method; persist Session IDs in the calling application when it needs to resume or present prior Sessions.
 
 ## Requirements
 
@@ -100,6 +102,26 @@ var result = await harness.RunAsync(
         Console.WriteLine($"{notification.Method}: {notification.Parameters}"));
 ```
 
+For an application-owned approval prompt, opt in explicitly. Only `AllowOnce` grants the current operation; the SDK never grants approvals by default:
+
+```csharp
+var options = new DeepSeekHarnessOptions
+{
+    ApprovalRequests = true,
+    OnApprovalRequest = async (request, cancellationToken) =>
+    {
+        Console.WriteLine(
+            $"Allow {request.ToolName} once? {request.Reason ?? string.Empty}");
+        var answer = await Console.In.ReadLineAsync(cancellationToken);
+        return string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase)
+            ? ApprovalRequestDecision.AllowOnce
+            : ApprovalRequestDecision.Reject;
+    },
+};
+```
+
+Set `OnUserQuestion` to handle `ask_user_question` and plan reviews. The callback receives the original question ids and a cancellation token; answer each id once, or return `SdkUserQuestionResponse.Dismiss()` when the user cancels. The SDK advertises this capability only when the callback is configured. A cancelled question cancels its callback and discards any late answer.
+
 For direct access to the event stream, subscribe before submitting work:
 
 ```csharp
@@ -120,7 +142,7 @@ Console.WriteLine($"Queued message: {messageId}");
 - `PromptAsync` uses the lower-level `session/prompt` method and returns an enqueue receipt only.
 - Cancellation or timeout stops the caller's wait; it does not cancel or roll back work already accepted by DSH.
 - The runtime sends notifications for all sessions. The high-level run result filters activity to the requested Session and discovered in-process descendants; a raw subscription is intentionally unfiltered.
-- Unsupported server-to-client requests are rejected. Approval and interactive user-question callbacks are not implemented yet.
+- Unsupported server-to-client requests are rejected. Approval requests are opt-in and one-shot; malformed decisions and callback failures return protocol errors, so operations fail closed. Native user questions require an `OnUserQuestion` handler unless the DSH composition supplies its own answerer.
 - The SDK should be treated as a local process client, not as a network server. Put authentication and authorization in a trusted service boundary if you expose jobs remotely.
 
 ## Build and test

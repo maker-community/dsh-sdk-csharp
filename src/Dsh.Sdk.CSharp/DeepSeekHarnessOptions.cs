@@ -36,6 +36,21 @@ public sealed class DeepSeekHarnessOptions
     /// <summary>Optional positive output-token limit for model requests.</summary>
     public int? MaxTokens { get; init; }
 
+    /// <summary>
+    /// Enables client-owned one-shot approval requests. Approvals remain fail-closed
+    /// when <see cref="OnApprovalRequest"/> is not provided.
+    /// </summary>
+    public bool ApprovalRequests { get; init; }
+
+    /// <summary>Handles an SDK-owned one-shot operation approval.</summary>
+    public ApprovalRequestHandler? OnApprovalRequest { get; init; }
+
+    /// <summary>
+    /// Handles native user questions and plan reviews. Supplying this callback
+    /// advertises the user-question capability to the runtime.
+    /// </summary>
+    public UserQuestionHandler? OnUserQuestion { get; init; }
+
     /// <summary>Optional timeout for each JSON-RPC request. Null waits without a deadline.</summary>
     public TimeSpan? RequestTimeout { get; init; }
 

@@ -48,7 +48,7 @@ while (Console.ReadLine() is { } line)
                 {
                     jsonrpc = "2.0",
                     id = "server-request-1",
-                    method = "approval/request",
+                    method = "unsupported/server-method",
                     @params = new { sessionId = "fake-session", toolName = "bash" },
                 }));
                 var responseLine = await Console.In.ReadLineAsync()
@@ -58,6 +58,49 @@ while (Console.ReadLine() is { } line)
                 {
                     await File.WriteAllTextAsync(responsePath, responseLine);
                 }
+            }
+
+            if (Environment.GetEnvironmentVariable("FAKE_DSH_APPROVAL_REQUEST") == "1")
+            {
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = "approval-request-1",
+                    method = "approval/request",
+                    @params = new
+                    {
+                        sessionId = "fake-session",
+                        toolName = "bash",
+                        callId = "call-1",
+                        reason = "The command needs approval.",
+                    },
+                }));
+                await CaptureServerRequestResponseAsync("approval-request-1");
+            }
+
+            if (Environment.GetEnvironmentVariable("FAKE_DSH_USER_QUESTION") == "1")
+            {
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = "user-question-1",
+                    method = "user-question/ask",
+                    @params = new
+                    {
+                        requestId = "question-request-1",
+                        sessionId = "fake-session",
+                        questions = new[]
+                        {
+                            new
+                            {
+                                id = "question-1",
+                                question = "Proceed?",
+                                options = new[] { new { label = "Yes", description = "Continue." } },
+                            },
+                        },
+                    },
+                }));
+                await CaptureServerRequestResponseAsync("user-question-1");
             }
 
             Respond(id, new
@@ -95,6 +138,31 @@ while (Console.ReadLine() is { } line)
                 {
                     Respond(id, new { kind = "unknown" });
                     break;
+                }
+
+                if (Environment.GetEnvironmentVariable("FAKE_DSH_CANCEL_USER_QUESTION") == "1")
+                {
+                    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        jsonrpc = "2.0",
+                        id = "cancelled-question-1",
+                        method = "user-question/ask",
+                        @params = new
+                        {
+                            requestId = "cancelled-question-request",
+                            sessionId,
+                            questions = new[]
+                            {
+                                new { id = "cancel-question", question = "Continue?" },
+                            },
+                        },
+                    }));
+                    Notify("user-question.cancelled", new
+                    {
+                        requestId = "cancelled-question-request",
+                        sessionId,
+                    });
+                    await Task.Delay(150);
                 }
 
                 if (Environment.GetEnvironmentVariable("FAKE_DSH_NOISE") == "1")
@@ -304,5 +372,18 @@ static async Task DelayFromEnvironmentAsync(string name)
     if (int.TryParse(Environment.GetEnvironmentVariable(name), out var milliseconds) && milliseconds > 0)
     {
         await Task.Delay(milliseconds);
+    }
+}
+
+static async Task CaptureServerRequestResponseAsync(string requestId)
+{
+    var responseLine = await Console.In.ReadLineAsync()
+        ?? throw new InvalidDataException("Expected a response to the server request.");
+    var responsePath = Environment.GetEnvironmentVariable("FAKE_DSH_SERVER_RESPONSE");
+    if (!string.IsNullOrWhiteSpace(responsePath))
+    {
+        await File.AppendAllTextAsync(
+            responsePath,
+            requestId + ":" + responseLine + Environment.NewLine);
     }
 }

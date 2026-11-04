@@ -353,6 +353,329 @@ public sealed class DeepSeekHarnessClientTests
     }
 
     [Fact]
+    public async Task StartAsync_HandlesApprovalRequestOnlyWhenExplicitlyEnabled()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-approval-{Guid.NewGuid():N}.jsonl");
+        ApprovalRequest? received = null;
+        var options = CreateFakeOptions(
+            new Dictionary<string, string?>
+            {
+                ["FAKE_DSH_APPROVAL_REQUEST"] = "1",
+                ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                ["FAKE_DSH_CAPTURE"] = responsePath + ".requests",
+            },
+            approvalRequests: true,
+            onApprovalRequest: (request, _) =>
+            {
+                received = request;
+                return Task.FromResult(ApprovalRequestDecision.AllowOnce);
+            });
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(options))
+            {
+                await client.StartAsync();
+            }
+
+            Assert.NotNull(received);
+            Assert.Equal("fake-session", received.SessionId);
+            Assert.Equal("bash", received.ToolName);
+            Assert.Equal("call-1", received.CallId);
+            Assert.Equal("The command needs approval.", received.Reason);
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            Assert.Equal("approval-request-1", document.RootElement.GetProperty("id").GetString());
+            Assert.Equal("allowed-once", document.RootElement.GetProperty("result").GetProperty("outcome").GetString());
+            using var initialize = JsonDocument.Parse(File.ReadLines(responsePath + ".requests").First());
+            Assert.True(initialize.RootElement.GetProperty("params").GetProperty("approvalRequests").GetBoolean());
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+
+            if (File.Exists(responsePath + ".requests"))
+            {
+                File.Delete(responsePath + ".requests");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsApprovalWhenNoHandlerIsConfigured()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-approval-{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(CreateFakeOptions(
+                new Dictionary<string, string?>
+                {
+                    ["FAKE_DSH_APPROVAL_REQUEST"] = "1",
+                    ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                })))
+            {
+                await client.StartAsync();
+            }
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            Assert.Equal(-32601, document.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_MapsApprovalCallbackFailureToJsonRpcError()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-approval-{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(CreateFakeOptions(
+                new Dictionary<string, string?>
+                {
+                    ["FAKE_DSH_APPROVAL_REQUEST"] = "1",
+                    ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                },
+                approvalRequests: true,
+                onApprovalRequest: (_, _) => throw new InvalidOperationException("do not expose details"))))
+            {
+                await client.StartAsync();
+            }
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            Assert.Equal(-32603, document.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+            Assert.DoesNotContain(
+                "do not expose details",
+                document.RootElement.GetProperty("error").GetProperty("message").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_AnswersUserQuestionAndAdvertisesCapability()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-question-{Guid.NewGuid():N}.jsonl");
+        SdkUserQuestionRequest? received = null;
+        var options = CreateFakeOptions(
+            new Dictionary<string, string?>
+            {
+                ["FAKE_DSH_USER_QUESTION"] = "1",
+                ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                ["FAKE_DSH_CAPTURE"] = responsePath + ".requests",
+            },
+            onUserQuestion: (request, _) =>
+            {
+                received = request;
+                return Task.FromResult(SdkUserQuestionResponse.Answer(
+                    [new SdkUserQuestionAnswer("question-1", ["Yes"])]));
+            });
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(options))
+            {
+                await client.StartAsync();
+            }
+
+            Assert.NotNull(received);
+            Assert.Equal("question-request-1", received.RequestId);
+            Assert.Equal("fake-session", received.SessionId);
+            Assert.Equal("Proceed?", received.Questions[0].GetProperty("question").GetString());
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var responseDocument = JsonDocument.Parse(response);
+            Assert.Equal("user-question-1", responseDocument.RootElement.GetProperty("id").GetString());
+            var answer = responseDocument.RootElement.GetProperty("result").GetProperty("answers")[0];
+            Assert.Equal("question-1", answer.GetProperty("id").GetString());
+            Assert.Equal("Yes", answer.GetProperty("selected")[0].GetString());
+            Assert.False(answer.TryGetProperty("custom", out _));
+
+            var initialize = File.ReadLines(responsePath + ".requests")
+                .Select(line => JsonDocument.Parse(line))
+                .Select(document => document.RootElement.Clone())
+                .First(frame => frame.GetProperty("method").GetString() == "initialize");
+            Assert.True(initialize.GetProperty("params").GetProperty("capabilities")
+                .GetProperty("userQuestions").GetBoolean());
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+
+            if (File.Exists(responsePath + ".requests"))
+            {
+                File.Delete(responsePath + ".requests");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_UserQuestionCallbackCanDismissWithoutInventingAnswers()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-question-{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(CreateFakeOptions(
+                new Dictionary<string, string?>
+                {
+                    ["FAKE_DSH_USER_QUESTION"] = "1",
+                    ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                },
+                onUserQuestion: (_, _) => Task.FromResult(SdkUserQuestionResponse.Dismiss()))))
+            {
+                await client.StartAsync();
+            }
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            var result = document.RootElement.GetProperty("result");
+            Assert.True(result.GetProperty("cancelled").GetBoolean());
+            Assert.False(result.TryGetProperty("answers", out _));
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsMalformedUserQuestionAnswers()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-question-{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(CreateFakeOptions(
+                new Dictionary<string, string?>
+                {
+                    ["FAKE_DSH_USER_QUESTION"] = "1",
+                    ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                },
+                onUserQuestion: (_, _) => Task.FromResult(SdkUserQuestionResponse.Answer([])))))
+            {
+                await client.StartAsync();
+            }
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            Assert.Equal(-32603, document.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StartAsync_MapsUserQuestionCallbackFailureToJsonRpcError()
+    {
+        var responsePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-question-{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            await using (var client = new DeepSeekHarnessClient(CreateFakeOptions(
+                new Dictionary<string, string?>
+                {
+                    ["FAKE_DSH_USER_QUESTION"] = "1",
+                    ["FAKE_DSH_SERVER_RESPONSE"] = responsePath,
+                },
+                onUserQuestion: (_, _) => throw new InvalidOperationException("private callback failure"))))
+            {
+                await client.StartAsync();
+            }
+
+            var response = File.ReadAllText(responsePath).Split(':', 2)[1];
+            using var document = JsonDocument.Parse(response);
+            Assert.Equal(-32603, document.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+            Assert.DoesNotContain(
+                "private callback failure",
+                document.RootElement.GetProperty("error").GetProperty("message").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(responsePath))
+            {
+                File.Delete(responsePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_CancelsUserQuestionAndIgnoresLateCallbackAnswer()
+    {
+        var capturePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-question-cancel-{Guid.NewGuid():N}.jsonl");
+        var callbackCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var options = CreateFakeOptions(
+            new Dictionary<string, string?>
+            {
+                ["FAKE_DSH_CANCEL_USER_QUESTION"] = "1",
+                ["FAKE_DSH_CAPTURE"] = capturePath,
+            },
+            onUserQuestion: async (request, cancellationToken) =>
+            {
+                Assert.Equal("cancelled-question-request", request.RequestId);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    callbackCancelled.TrySetResult();
+                    await Task.Delay(50);
+                    return SdkUserQuestionResponse.Answer(
+                        [new SdkUserQuestionAnswer("cancel-question", ["Continue"])]);
+                }
+
+                throw new InvalidOperationException("The scripted user question was not cancelled.");
+            });
+
+        await using var client = new DeepSeekHarnessClient(options);
+        var result = await client.RunAsync("Exercise cancellation.", "question-session");
+        await callbackCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal("fake response", result.FinalResponse);
+        var frames = File.ReadAllLines(capturePath)
+            .Select(line => JsonDocument.Parse(line))
+            .Select(document => document.RootElement.Clone())
+            .ToArray();
+        Assert.DoesNotContain(frames, frame =>
+            frame.TryGetProperty("id", out var id)
+            && id.ValueKind == JsonValueKind.String
+            && id.GetString() == "cancelled-question-1");
+        File.Delete(capturePath);
+    }
+
+    [Fact]
     public async Task RunAsync_ReportsRequestTimeoutWithoutRetryingAcceptedWork()
     {
         var capturePath = Path.Combine(Path.GetTempPath(), $"dsh-sdk-timeout-{Guid.NewGuid():N}.jsonl");
@@ -445,7 +768,10 @@ public sealed class DeepSeekHarnessClientTests
     private static DeepSeekHarnessOptions CreateFakeOptions(
         IReadOnlyDictionary<string, string?>? environmentVariables = null,
         TimeSpan? requestTimeout = null,
-        TimeSpan? initializationTimeout = null)
+        TimeSpan? initializationTimeout = null,
+        bool approvalRequests = false,
+        ApprovalRequestHandler? onApprovalRequest = null,
+        UserQuestionHandler? onUserQuestion = null)
     {
         var fakeRuntimeProject = Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory,
@@ -463,6 +789,9 @@ public sealed class DeepSeekHarnessClientTests
             WorkingDirectory = Environment.CurrentDirectory,
             RequestTimeout = requestTimeout,
             InitializationTimeout = initializationTimeout ?? TimeSpan.FromSeconds(10),
+            ApprovalRequests = approvalRequests,
+            OnApprovalRequest = onApprovalRequest,
+            OnUserQuestion = onUserQuestion,
             EnvironmentVariables = environmentVariables ?? new Dictionary<string, string?>(),
         };
     }

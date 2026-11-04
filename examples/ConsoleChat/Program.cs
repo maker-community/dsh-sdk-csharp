@@ -33,6 +33,9 @@ try
         Profile = profile,
         ProcessWorkingDirectory = workspace.FullName,
         WorkingDirectory = workspace.FullName,
+        ApprovalRequests = true,
+        OnApprovalRequest = AskForApprovalAsync,
+        OnUserQuestion = AskUserQuestionAsync,
     };
 
     await using var harness = new DeepSeekHarnessClient(options);
@@ -105,6 +108,95 @@ finally
     if (deleteWorkspaceOnExit)
     {
         workspace.Delete(recursive: true);
+    }
+}
+
+static async Task<ApprovalRequestDecision> AskForApprovalAsync(
+    ApprovalRequest request,
+    CancellationToken cancellationToken)
+{
+    await Console.Error.WriteLineAsync(
+        $"[Approval required] Session {request.SessionId}: {request.ToolName}");
+    if (!string.IsNullOrWhiteSpace(request.Reason))
+    {
+        await Console.Error.WriteLineAsync(request.Reason);
+    }
+
+    await Console.Error.WriteAsync("Allow this operation once? [y/N]: ");
+    var answer = await Console.In.ReadLineAsync(cancellationToken);
+    return string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase)
+        ? ApprovalRequestDecision.AllowOnce
+        : ApprovalRequestDecision.Reject;
+}
+
+static async Task<SdkUserQuestionResponse> AskUserQuestionAsync(
+    SdkUserQuestionRequest request,
+    CancellationToken cancellationToken)
+{
+    var answers = new List<SdkUserQuestionAnswer>(request.Questions.Count);
+    try
+    {
+        foreach (var question in request.Questions)
+        {
+            var prompt = question.TryGetProperty("question", out var questionText)
+                && questionText.ValueKind == JsonValueKind.String
+                ? questionText.GetString() ?? "(question)"
+                : "(question)";
+            await Console.Error.WriteLineAsync($"[Question] {prompt}");
+
+            if (question.TryGetProperty("detail", out var detail)
+                && detail.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(detail.GetString()))
+            {
+                await Console.Error.WriteLineAsync(detail.GetString());
+            }
+
+            var options = question.TryGetProperty("options", out var optionsElement)
+                && optionsElement.ValueKind == JsonValueKind.Array
+                ? optionsElement.EnumerateArray()
+                    .Where(option => option.TryGetProperty("label", out var label)
+                        && label.ValueKind == JsonValueKind.String)
+                    .Select(option => option.GetProperty("label").GetString()!)
+                    .ToArray()
+                : [];
+            for (var index = 0; index < options.Length; index++)
+            {
+                await Console.Error.WriteLineAsync($"  {index + 1}. {options[index]}");
+            }
+
+            await Console.Error.WriteAsync("Answer (number, option label, or custom text; blank to skip): ");
+            var response = await Console.In.ReadLineAsync(cancellationToken);
+            var selected = Array.Empty<string>();
+            string? custom = null;
+            if (!string.IsNullOrWhiteSpace(response))
+            {
+                if (int.TryParse(response, out var optionIndex)
+                    && optionIndex >= 1
+                    && optionIndex <= options.Length)
+                {
+                    selected = [options[optionIndex - 1]];
+                }
+                else if (options.Contains(response, StringComparer.Ordinal))
+                {
+                    selected = [response];
+                }
+                else
+                {
+                    custom = response;
+                }
+            }
+
+            answers.Add(new SdkUserQuestionAnswer(
+                question.GetProperty("id").GetString()!,
+                selected,
+                custom));
+        }
+
+        return SdkUserQuestionResponse.Answer(answers);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        return SdkUserQuestionResponse.Dismiss();
     }
 }
 

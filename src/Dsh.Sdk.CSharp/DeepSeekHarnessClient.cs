@@ -24,6 +24,8 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
     private readonly SemaphoreSlim _startGate = new(1, 1);
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pending = new();
+    private readonly ConcurrentDictionary<string, PendingServerRequest> _serverRequests = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PendingServerRequest> _userQuestions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _sessionRunGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, Channel<HarnessNotification>> _subscribers = new();
     private readonly ConcurrentQueue<string> _stderrTail = new();
@@ -77,6 +79,15 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
                 };
                 AddIfPresent(parameters, "reasoningEffort", _options.ReasoningEffort);
                 AddIfPresent(parameters, "maxTokens", _options.MaxTokens);
+                if (_options.ApprovalRequests)
+                {
+                    parameters["approvalRequests"] = true;
+                }
+
+                if (_options.OnUserQuestion is not null)
+                {
+                    parameters["capabilities"] = new { userQuestions = true };
+                }
 
                 var result = await SendRequestAsync<InitializeResult>(
                     "initialize", parameters, cancellationToken).ConfigureAwait(false);
@@ -342,6 +353,7 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
             return;
         }
 
+        CancelPendingServerRequests();
         Exception? shutdownFailure = null;
         var process = _process;
         if (process is not null && !HasExited(process))
@@ -710,7 +722,10 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         var hasMethod = TryGetString(root, "method", out var method);
         if (hasId && hasMethod)
         {
-            _ = WriteServerRequestErrorAsync(idElement.Clone(), method);
+            var parameters = root.TryGetProperty("params", out var requestParams)
+                ? requestParams.Clone()
+                : EmptyObject;
+            _ = HandleServerRequestAsync(idElement.Clone(), method, parameters);
             return;
         }
 
@@ -756,27 +771,350 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
             var parameters = root.TryGetProperty("params", out var paramsElement)
                 ? paramsElement.Clone()
                 : EmptyObject;
+            if (method == "user-question.cancelled")
+            {
+                CancelUserQuestion(parameters);
+            }
+
             PublishNotification(new HarnessNotification(method, parameters));
         }
     }
 
-    private async Task WriteServerRequestErrorAsync(JsonElement id, string method)
+    private async Task HandleServerRequestAsync(JsonElement id, string method, JsonElement parameters)
+    {
+        if (method is not ("approval/request" or "user-question/ask"))
+        {
+            await WriteServerRequestErrorAsync(
+                id,
+                -32601,
+                $"Unsupported server request '{method}'.").ConfigureAwait(false);
+            return;
+        }
+
+        var idKey = GetId(id);
+        var pending = new PendingServerRequest(idKey, id.Clone());
+        if (!_serverRequests.TryAdd(idKey, pending))
+        {
+            await WriteServerRequestErrorAsync(
+                id,
+                -32600,
+                "Duplicate server request id.").ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            if (method == "approval/request")
+            {
+                await HandleApprovalRequestAsync(idKey, pending, parameters).ConfigureAwait(false);
+            }
+            else
+            {
+                await HandleUserQuestionRequestAsync(idKey, pending, parameters).ConfigureAwait(false);
+            }
+        }
+        catch (Exception)
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                $"The SDK handler for '{method}' failed.").ConfigureAwait(false);
+        }
+        finally
+        {
+            pending.Cancellation.Dispose();
+        }
+    }
+
+    private async Task HandleApprovalRequestAsync(
+        string idKey,
+        PendingServerRequest pending,
+        JsonElement parameters)
+    {
+        if (!_options.ApprovalRequests || _options.OnApprovalRequest is null)
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32601,
+                "No approval/request handler is configured.").ConfigureAwait(false);
+            return;
+        }
+
+        if (!TryGetString(parameters, "sessionId", out var sessionId)
+            || !TryGetString(parameters, "toolName", out var toolName))
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "approval/request contained invalid parameters.").ConfigureAwait(false);
+            return;
+        }
+
+        var request = new ApprovalRequest(
+            sessionId,
+            toolName,
+            TryGetString(parameters, "callId", out var callId) ? callId : null,
+            TryGetString(parameters, "reason", out var reason) ? reason : null);
+        var decision = await _options.OnApprovalRequest(request, pending.Cancellation.Token)
+            .ConfigureAwait(false);
+        if (decision is null
+            || decision.Outcome is not ("allowed-once" or "rejected" or "cancelled"))
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "The approval handler returned an invalid decision.").ConfigureAwait(false);
+            return;
+        }
+
+        await CompleteServerRequestAsync(idKey, pending, new { outcome = decision.Outcome })
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleUserQuestionRequestAsync(
+        string idKey,
+        PendingServerRequest pending,
+        JsonElement parameters)
+    {
+        if (_options.OnUserQuestion is null)
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32601,
+                "No user-question/ask handler is configured.").ConfigureAwait(false);
+            return;
+        }
+
+        if (!TryGetString(parameters, "requestId", out var requestId)
+            || string.IsNullOrWhiteSpace(requestId)
+            || !TryGetString(parameters, "sessionId", out var sessionId)
+            || !parameters.TryGetProperty("questions", out var questions)
+            || questions.ValueKind != JsonValueKind.Array
+            || questions.GetArrayLength() == 0)
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "user-question/ask contained invalid parameters.").ConfigureAwait(false);
+            return;
+        }
+
+        var questionItems = questions.EnumerateArray().Select(question => question.Clone()).ToArray();
+        if (questionItems.Any(question =>
+                question.ValueKind != JsonValueKind.Object
+                || !TryGetString(question, "id", out var questionId)
+                || string.IsNullOrWhiteSpace(questionId)))
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "user-question/ask contained a malformed question.").ConfigureAwait(false);
+            return;
+        }
+
+        var questionIds = questionItems
+            .Select(question =>
+            {
+                TryGetString(question, "id", out var questionId);
+                return questionId;
+            })
+            .ToHashSet(StringComparer.Ordinal);
+        if (questionIds.Count != questionItems.Length)
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "user-question/ask contained duplicate question ids.").ConfigureAwait(false);
+            return;
+        }
+
+        pending.UserQuestionRequestId = requestId;
+        if (!_userQuestions.TryAdd(requestId, pending))
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32600,
+                "Duplicate user-question requestId.").ConfigureAwait(false);
+            return;
+        }
+
+        var answer = await _options.OnUserQuestion(
+                new SdkUserQuestionRequest(requestId, sessionId, questionItems),
+                pending.Cancellation.Token)
+            .ConfigureAwait(false);
+
+        if (answer is null || !IsValidQuestionResponse(answer, questionIds))
+        {
+            await CompleteServerRequestWithErrorAsync(
+                idKey,
+                pending,
+                -32603,
+                "The user-question handler returned an invalid answer.").ConfigureAwait(false);
+            return;
+        }
+
+        await CompleteServerRequestAsync(idKey, pending, answer).ConfigureAwait(false);
+    }
+
+    private static bool IsValidQuestionResponse(
+        SdkUserQuestionResponse response,
+        IReadOnlySet<string> expectedQuestionIds)
+    {
+        if (response.Cancelled == true)
+        {
+            return response.Answers is null;
+        }
+
+        if (response.Cancelled is not null
+            || response.Answers is null
+            || response.Answers.Count != expectedQuestionIds.Count)
+        {
+            return false;
+        }
+
+        var answeredIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var answer in response.Answers)
+        {
+            if (answer is null
+                || string.IsNullOrWhiteSpace(answer.Id)
+                || !expectedQuestionIds.Contains(answer.Id)
+                || !answeredIds.Add(answer.Id)
+                || answer.Selected is null
+                || answer.Selected.Any(string.IsNullOrWhiteSpace))
+            {
+                return false;
+            }
+        }
+
+        return answeredIds.SetEquals(expectedQuestionIds);
+    }
+
+    private void CancelUserQuestion(JsonElement parameters)
+    {
+        if (!TryGetString(parameters, "requestId", out var requestId)
+            || !_userQuestions.TryRemove(requestId, out var pending))
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref pending.State, PendingServerRequest.Cancelled, PendingServerRequest.Pending)
+            == PendingServerRequest.Pending)
+        {
+            _serverRequests.TryRemove(pending.IdKey, out _);
+            CancelRequestToken(pending);
+        }
+    }
+
+    private async Task CompleteServerRequestAsync(
+        string idKey,
+        PendingServerRequest pending,
+        object result)
+    {
+        if (Interlocked.CompareExchange(ref pending.State, PendingServerRequest.Completed, PendingServerRequest.Pending)
+            != PendingServerRequest.Pending)
+        {
+            return;
+        }
+
+        RemovePendingServerRequest(idKey, pending);
+        try
+        {
+            await WriteFrameAsync(new
+            {
+                jsonrpc = "2.0",
+                id = pending.Id,
+                result,
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is HarnessTransportException or IOException or ObjectDisposedException
+                or InvalidOperationException)
+        {
+            FailTransport(new HarnessTransportException(
+                "Could not return a server request result to the Harness runtime.", exception));
+        }
+    }
+
+    private async Task CompleteServerRequestWithErrorAsync(
+        string idKey,
+        PendingServerRequest pending,
+        int code,
+        string message)
+    {
+        if (Interlocked.CompareExchange(ref pending.State, PendingServerRequest.Completed, PendingServerRequest.Pending)
+            != PendingServerRequest.Pending)
+        {
+            return;
+        }
+
+        RemovePendingServerRequest(idKey, pending);
+        try
+        {
+            await WriteServerRequestErrorAsync(pending.Id, code, message).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is HarnessTransportException or IOException or ObjectDisposedException
+                or InvalidOperationException)
+        {
+            FailTransport(new HarnessTransportException(
+                "Could not return a server request error to the Harness runtime.", exception));
+        }
+    }
+
+    private void RemovePendingServerRequest(string idKey, PendingServerRequest pending)
+    {
+        _serverRequests.TryRemove(idKey, out _);
+        if (pending.UserQuestionRequestId is { } requestId)
+        {
+            _userQuestions.TryRemove(requestId, out _);
+        }
+    }
+
+    private async Task WriteServerRequestErrorAsync(JsonElement id, int code, string message)
     {
         var error = new Dictionary<string, object?>
         {
             ["jsonrpc"] = "2.0",
             ["id"] = id,
-            ["error"] = new { code = -32601, message = $"Unsupported server request '{method}'." },
+            ["error"] = new { code, message },
         };
+        await WriteFrameAsync(error, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private void CancelPendingServerRequests()
+    {
+        foreach (var (id, pending) in _serverRequests)
+        {
+            if (Interlocked.CompareExchange(
+                    ref pending.State,
+                    PendingServerRequest.Cancelled,
+                    PendingServerRequest.Pending) != PendingServerRequest.Pending)
+            {
+                continue;
+            }
+
+            RemovePendingServerRequest(id, pending);
+            CancelRequestToken(pending);
+        }
+    }
+
+    private static void CancelRequestToken(PendingServerRequest pending)
+    {
         try
         {
-            await WriteFrameAsync(error, CancellationToken.None).ConfigureAwait(false);
+            pending.Cancellation.Cancel();
         }
-        catch (Exception exception) when (
-            exception is IOException or ObjectDisposedException or InvalidOperationException)
+        catch (ObjectDisposedException)
         {
-            FailTransport(new HarnessTransportException(
-                "Could not reject an unsupported Harness server request.", exception));
         }
     }
 
@@ -816,6 +1154,7 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
     {
         Interlocked.CompareExchange(ref _transportFailure, exception, null);
         var failure = _transportFailure!;
+        CancelPendingServerRequests();
         FailPendingRequests(failure);
         CompleteSubscriptions(failure);
     }
@@ -844,6 +1183,7 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
             return;
         }
 
+        CancelPendingServerRequests();
         Interlocked.Exchange(ref _suppressTransportFailure, 1);
         Exception? cleanupFailure = null;
         try
@@ -1116,6 +1456,25 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
     }
 
     private sealed record QueryCompleted(string FinalResponse, string FinishReason);
+
+    private sealed class PendingServerRequest
+    {
+        public const int Pending = 0;
+        public const int Completed = 1;
+        public const int Cancelled = 2;
+
+        public PendingServerRequest(string idKey, JsonElement id)
+        {
+            IdKey = idKey;
+            Id = id;
+        }
+
+        public string IdKey { get; }
+        public JsonElement Id { get; }
+        public CancellationTokenSource Cancellation { get; } = new();
+        public string? UserQuestionRequestId { get; set; }
+        public int State;
+    }
 
     private sealed class RunActivity
     {
