@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "DSH C# SDK ConsoleChat",
+      "type": "shell",
+      "command": "$ErrorActionPreference = 'Stop'; $dsh = Join-Path $env:LOCALAPPDATA 'Programs\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd'; $dshHome = Join-Path $HOME '.dsh'; $profile = 'dsh-sdk-csharp-chat'; $profilePath = Join-Path $dshHome \"profiles\\$profile\"; if (-not (Test-Path -LiteralPath $profilePath)) { & $env:ComSpec /d /s /c \"call `\"$dsh`\" --profile $profile --from-default-profile sdk --dump-config >nul\"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; $workspace = Join-Path $dshHome 'workspaces\\dsh-sdk-csharp-chat'; dotnet run --project .\\examples\\ConsoleChat\\ConsoleChat.csproj --configuration Release -- \"$dsh\" \"$dshHome\" \"$profile\" \"$workspace\"",
+      "options": {
+        "shell": {
+          "executable": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command"
+          ]
+        }
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}

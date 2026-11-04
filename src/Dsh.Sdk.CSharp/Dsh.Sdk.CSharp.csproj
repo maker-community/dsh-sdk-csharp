@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DeepSeek.Harness.Sdk</RootNamespace>
+    <AssemblyName>DeepSeek.Harness.Sdk</AssemblyName>
+    <PackageId>DeepSeek.Harness.Sdk</PackageId>
+    <Version>0.1.0-alpha.1</Version>
+    <Description>Community .NET SDK for driving the official DeepSeek Harness runtime over its stdio JSON-RPC protocol.</Description>
+    <PackageTags>deepseek;harness;dsh;agent;sdk;dotnet;csharp;json-rpc</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

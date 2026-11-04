@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/.vscode/">
+    <File Path=".vscode/tasks.json" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Dsh.Sdk.CSharp/Dsh.Sdk.CSharp.csproj" />
+  </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/ConsoleChat/ConsoleChat.csproj" />
+    <Project Path="examples/LiveSmoke/LiveSmoke.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Dsh.Sdk.CSharp.Tests/Dsh.Sdk.CSharp.Tests.csproj" />
+    <Project Path="tests/FakeDshRuntime/FakeDshRuntime.csproj" />
+  </Folder>
+</Solution>
