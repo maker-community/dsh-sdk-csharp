@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Dsh.Sdk.CSharp/Dsh.Sdk.CSharp.csproj" />
+    <Project Path="src/Dsh.Sdk.CSharp.McpServer/Dsh.Sdk.CSharp.McpServer.csproj" />
   </Folder>
   <Folder Name="/examples/">
     <Project Path="examples/ConsoleChat/ConsoleChat.csproj" />

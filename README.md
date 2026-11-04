@@ -80,6 +80,14 @@ On Windows, `sandbox-local windows-acl temp grant materialization failed` is a D
 
 The demo uses the model credentials already configured in the specified DSH home; it does not prompt for or print API keys. On Windows Desktop installations, pass the bundled `dsh.cmd`; the SDK launches batch files through `cmd.exe`.
 
+## Streamable HTTP MCP bridge
+
+The separate [`Dsh.Sdk.CSharp.McpServer`](./src/Dsh.Sdk.CSharp.McpServer/README.md) project wraps this SDK with the official MCP C# SDK and exposes a bearer-key-protected Streamable HTTP endpoint at `/mcp`. Its `dsh_run` tool can optionally email a result to an explicitly allowlisted address. It currently runs synchronously and does not provide a durable job queue or its own scheduler.
+
+This bridge exposes a standard Streamable HTTP MCP endpoint for compatible clients. Device-specific integrations should use a separate adapter or gateway; for example, [verdure-mcp-for-xiaozhi](https://github.com/maker-community/verdure-mcp-for-xiaozhi) adapts MCP services for Xiaozhi and Tuya smart devices.
+
+The MCP service starts the local DSH executable through this repository's SDK; it does not call a remote DSH service. The SDK uses its default provider/model route and supplies the protocol-required fields during initialization; the MCP service has no duplicate model settings. The DSH home/profile supplies local runtime configuration and credentials. The MCP project includes non-secret defaults in `appsettings.json`; environment variables or command-line settings can override them at runtime. The MCP API key and SMTP credentials are not stored in that file and should be provided through a secret store or environment variables.
+
 `RunAsync` returns after the prompt's durable inbox receipt and the root Agent's idle transition. This is the runtime's observed activity interval; it is not a causal guarantee if another caller or queued input is sharing that Session. Use a separate `sessionId`, workspace, and DSH home when independent work must be isolated.
 Calls through one client are serialized per `sessionId`; separate sessions can run concurrently.
 

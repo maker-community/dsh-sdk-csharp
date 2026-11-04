@@ -80,6 +80,34 @@ dotnet run --project .\examples\ConsoleChat\ConsoleChat.csproj -- `
 
 也可以在 VS Code 中选择 **Terminal → Run Task → DSH C# SDK ConsoleChat**；它会为 Demo 创建持久工作目录。
 
+## Streamable HTTP MCP 服务桥接
+
+仓库新增独立的 ASP.NET Core MCP 服务项目：`src/Dsh.Sdk.CSharp.McpServer`。它通过官方 MCP C# SDK 提供 `/mcp` Streamable HTTP 端点，并调用本仓库的 DSH C# SDK。当前提供 `dsh_run(prompt, conversationId?, notifyEmail?)` 工具。
+
+服务通过 SDK 在本机启动 DSH 可执行程序，不调用远程 DSH 服务。`DSH_HOME` 和 `DSH_PROFILE` 指定本机运行时配置与凭据。SDK 使用自身的 provider/model 默认路由，并在初始化时发送协议要求的字段；MCP 服务不再提供重复的模型配置项。
+
+MCP 项目包含 `appsettings.json`，提供非敏感的本地默认配置；ASP.NET Core 会自动加载，运行时环境变量和命令行配置可以覆盖它。`MCP_API_KEY` 不写入文件，仍须通过密钥存储或环境变量提供至少 32 个字符的随机值。不要把生产凭据提交到配置文件。
+
+最小启动示例：
+
+```powershell
+$env:MCP_API_KEY = [Convert]::ToBase64String(
+    [Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+$env:ASPNETCORE_URLS = "http://127.0.0.1:8000"
+$env:DSH_EXECUTABLE = "C:\path\to\dsh.cmd"
+$env:DSH_HOME = "$HOME\.dsh"
+$env:DSH_PROFILE = "sdk"
+$env:DSH_WORKSPACE = "$HOME\workspaces\dsh-mcp"
+
+dotnet run --project .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj
+```
+
+`MCP_API_KEY` 必填且至少 32 个字符；访问 `/mcp` 时须带 `Authorization: Bearer <MCP_API_KEY>`。服务不会记录或回显 API Key。服务默认拒绝未列入 `MCP_ALLOWED_ORIGINS` 的浏览器 `Origin`；生产部署应使用 HTTPS 或置于可信 TLS 反向代理后，避免将明文 HTTP 暴露到公网。
+
+本项目提供标准 Streamable HTTP MCP 端点，可由兼容的 MCP Client 调用。设备协议适配由独立网关负责；例如 [verdure-mcp-for-xiaozhi](https://github.com/maker-community/verdure-mcp-for-xiaozhi) 用于将 MCP 服务转换为 Xiaozhi 与 Tuya 智能设备可用的服务。
+
+**首版边界：** `dsh_run` 是同步工具调用，等待 DSH 完成后返回；长任务可能超过 MCP Client 的请求超时。目前没有持久任务队列/任务 ID 轮询，也没有本项目自带的 Cron 调度器。可选邮件通知要求 SMTP 配置，收件人必须在 `Email:AllowedRecipients`（或兼容的 `DSH_EMAIL_ALLOWED_RECIPIENTS` 环境变量）明确 allowlist 中。详细环境变量、安全边界和验证方式见 [MCP 服务 README](./src/Dsh.Sdk.CSharp.McpServer/README.md)。
+
 多次使用同一个 `DeepSeekHarnessClient`，并传入相同 `sessionId`，可以继续该 Session：
 
 ```csharp
