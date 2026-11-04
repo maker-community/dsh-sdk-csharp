@@ -45,6 +45,19 @@ Authorization: Bearer <MCP_API_KEY>
 
 This service exposes a standard Streamable HTTP MCP endpoint for compatible clients. Device-specific protocol adaptation belongs in a separate gateway. For Xiaozhi and Tuya smart-device integration, see [verdure-mcp-for-xiaozhi](https://github.com/maker-community/verdure-mcp-for-xiaozhi).
 
+## VS Code local debugging
+
+The workspace `.vscode/mcp.json` registers this service as an HTTP MCP server at `http://127.0.0.1:8000/mcp`. It does not launch the ASP.NET Core process; start it separately in a PowerShell terminal with the same local API key you enter when VS Code prompts:
+
+```powershell
+$secureKey = Read-Host "Local MCP_API_KEY (at least 32 characters)" -AsSecureString
+$env:MCP_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
+$env:ASPNETCORE_URLS = "http://127.0.0.1:8000"
+dotnet run --project .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj
+```
+
+In VS Code, start `dsh-csharp-local` from the MCP server list and enter the same key. Keep the listener bound to loopback for local debugging.
+
 ## MCP tool
 
 `dsh_run(prompt, conversationId?, notifyEmail?)`

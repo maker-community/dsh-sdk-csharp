@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "dsh-csharp-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:dshMcpApiKey}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "dshMcpApiKey",
+      "description": "Local DSH MCP API key (must match MCP_API_KEY)",
+      "password": true
+    }
+  ]
+}
