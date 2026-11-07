@@ -21,7 +21,7 @@ public sealed class McpBridgeSettingsTests
             File.WriteAllText(expectedPath, string.Empty);
             Environment.SetEnvironmentVariable("PATH", directory.FullName);
 
-            var settings = LoadSettings();
+            var settings = LoadSettings(("DSH_EXECUTABLE", string.Empty));
 
             Assert.Equal(expectedPath, settings.DshExecutable);
         }
@@ -79,12 +79,27 @@ public sealed class McpBridgeSettingsTests
         Assert.Equal(Path.GetFullPath(workspace), settings.DshWorkspace);
     }
 
+    [Fact]
+    public void Load_DisablesEmailNotificationsByDefaultAndAllowsExplicitEnablement()
+    {
+        Assert.False(LoadSettings().EmailNotificationsEnabled);
+        Assert.True(LoadSettings(("Email:Enabled", "true")).EmailNotificationsEnabled);
+    }
+
+    [Fact]
+    public void Load_DisablesDshMessageContentLoggingByDefaultAndAllowsExplicitEnablement()
+    {
+        Assert.False(LoadSettings().LogDshMessages);
+        Assert.True(LoadSettings(("DSH_MCP_LOG_DSH_MESSAGES", "true")).LogDshMessages);
+    }
+
     private static McpBridgeSettings LoadSettings(
         params (string Key, string Value)[] additionalSettings)
     {
         var settings = new Dictionary<string, string?>
         {
             ["MCP_API_KEY"] = new string('k', 32),
+            ["DSH_EXECUTABLE"] = Path.Combine(Path.GetTempPath(), "mcp-settings-test-dsh"),
         };
         foreach (var (key, value) in additionalSettings)
         {

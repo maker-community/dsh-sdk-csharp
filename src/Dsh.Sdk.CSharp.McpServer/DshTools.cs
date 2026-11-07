@@ -8,33 +8,42 @@ namespace Dsh.Sdk.CSharp.McpServer;
 public static class DshTools
 {
     [McpServerTool(Name = "dsh_run")]
-    [Description("Run a coding or analysis task using the configured DeepSeek Harness workspace. Returns the final response and Session ID. Optionally emails the result to an allowlisted address.")]
+    [Description("Run a short coding or analysis task synchronously using the current session. For long-running work on XiaoZhi, use dsh_submit_task and receive the result by email.")]
     public static async Task<string> RunAsync(
         [Description("The task to give the DeepSeek Harness agent.")] string prompt,
         IDshExecutionService execution,
-        IEmailNotificationService email,
-        [Description("Optional conversation key to keep a separate DSH Session for this conversation.")] string? conversationId = null,
-        [Description("Optional verified/allowlisted email address to receive the completed result.")] string? notifyEmail = null,
+        IMcpStateStore state,
+        McpCallerContext callerContext,
+        McpBridgeSettings settings,
         CancellationToken cancellationToken = default)
     {
-        if (!string.IsNullOrWhiteSpace(notifyEmail))
+        if (string.IsNullOrWhiteSpace(prompt))
         {
-            email.ValidateRecipient(notifyEmail);
+            throw new ArgumentException("A non-empty prompt is required.", nameof(prompt));
         }
 
-        var result = await execution.RunAsync(prompt, conversationId, cancellationToken).ConfigureAwait(false);
-        EmailNotificationResult? emailResult = null;
-        if (!string.IsNullOrWhiteSpace(notifyEmail))
+        if (prompt.Length > settings.MaxPromptCharacters)
         {
-            emailResult = await email.SendResultAsync(notifyEmail, result, cancellationToken).ConfigureAwait(false);
+            throw new ArgumentOutOfRangeException(
+                nameof(prompt),
+                $"Prompt exceeds the configured {settings.MaxPromptCharacters}-character limit.");
         }
+
+        var caller = callerContext.GetRequired();
+        var session = await state.GetOrCreateActiveSessionAsync(
+            caller.UserId, caller.Email, cancellationToken).ConfigureAwait(false);
+        var result = await execution.RunAsync(prompt, session.DshSessionId, cancellationToken)
+            .ConfigureAwait(false);
+        var finalResponse = result.FinalResponse.Length <= settings.MaxResultCharacters
+            ? result.FinalResponse
+            : result.FinalResponse[..settings.MaxResultCharacters];
 
         return JsonSerializer.Serialize(new
         {
             result.SessionId,
             result.FinishReason,
-            result.FinalResponse,
-            Email = emailResult,
+            FinalResponse = finalResponse,
+            Truncated = finalResponse.Length < result.FinalResponse.Length,
         });
     }
 }

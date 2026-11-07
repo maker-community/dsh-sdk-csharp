@@ -2,9 +2,11 @@
   "servers": {
     "dsh-csharp-local": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "http://127.0.0.1:5211/mcp",
       "headers": {
-        "Authorization": "Bearer ${input:dshMcpApiKey}"
+        "Authorization": "Bearer ${input:dshMcpApiKey}",
+        "X-User-Id": "${input:dshMcpUserId}",
+        "X-User-Email": "${input:dshMcpUserEmail}"
       }
     }
   },
@@ -14,6 +16,16 @@
       "id": "dshMcpApiKey",
       "description": "Local DSH MCP API key (must match MCP_API_KEY)",
       "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "dshMcpUserId",
+      "description": "Stable user/device ID from trusted gateway context"
+    },
+    {
+      "type": "promptString",
+      "id": "dshMcpUserEmail",
+      "description": "Email address allowed by the MCP server"
     }
   ]
 }

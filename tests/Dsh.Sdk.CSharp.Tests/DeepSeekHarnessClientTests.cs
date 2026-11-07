@@ -94,6 +94,78 @@ public sealed class DeepSeekHarnessClientTests
     }
 
     [Fact]
+    public async Task RunAsync_ResumesExistingSessionAndRetriesQuery()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?> { ["FAKE_DSH_QUERY_SESSION_EXISTS"] = "1" }));
+
+        var result = await client.RunAsync("Continue the existing session.", "existing-session");
+
+        Assert.Equal("fake response", result.FinalResponse);
+        Assert.Equal("completed", result.FinishReason);
+        Assert.Equal(3, result.Events.Count);
+        Assert.Equal(5, result.Notifications.Count);
+    }
+
+    [Fact]
+    public async Task RunAsync_ResumesExistingSessionWhenLegacyPromptReportsCollision()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?>
+            {
+                ["FAKE_DSH_LEGACY_PROTOCOL"] = "1",
+                ["FAKE_DSH_PROMPT_SESSION_EXISTS"] = "1",
+            }));
+
+        var result = await client.RunAsync("Continue the existing session.", "existing-session");
+
+        Assert.Equal("legacy response", result.FinalResponse);
+        Assert.Equal("completed", result.FinishReason);
+    }
+
+    [Fact]
+    public async Task RunAsync_PreservesCommandRoutingAfterResumingExistingSession()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?> { ["FAKE_DSH_QUERY_SESSION_EXISTS"] = "1" }));
+
+        var result = await client.RunAsync("/fake-command", "existing-session");
+
+        Assert.Equal("command response", result.FinalResponse);
+        Assert.Equal("completed", result.FinishReason);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotResumeWhenCollisionRefersToAnotherSession()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?> { ["FAKE_DSH_QUERY_OTHER_SESSION_EXISTS"] = "1" }));
+
+        var exception = await Assert.ThrowsAsync<HarnessRpcException>(
+            () => client.RunAsync("Run a task.", "existing-session"));
+
+        Assert.Equal(-32603, exception.Code);
+        Assert.Contains("another-session", exception.RpcMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_PropagatesResumeFailureForExistingSession()
+    {
+        await using var client = new DeepSeekHarnessClient(CreateFakeOptions(
+            new Dictionary<string, string?>
+            {
+                ["FAKE_DSH_QUERY_SESSION_EXISTS"] = "1",
+                ["FAKE_DSH_RESUME_ERROR"] = "1",
+            }));
+
+        var exception = await Assert.ThrowsAsync<HarnessRpcException>(
+            () => client.RunAsync("Continue the existing session.", "existing-session"));
+
+        Assert.Equal(-32004, exception.Code);
+        Assert.Contains("session not found", exception.RpcMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task StartAsync_ReapsFailedRuntimeAndAllowsRetry()
     {
         var fakeRuntimeProject = Path.GetFullPath(Path.Combine(
@@ -799,13 +871,14 @@ public sealed class DeepSeekHarnessClientTests
             "..", "..", "..", "..",
             "FakeDshRuntime",
             "FakeDshRuntime.csproj"));
+        var configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name ?? "Release";
 
         return new DeepSeekHarnessOptions
         {
             DshExecutable = "dotnet",
             DshArguments =
             [
-                "run", "--no-build", "--configuration", "Release", "--project", fakeRuntimeProject, "--",
+                "run", "--no-build", "--configuration", configuration, "--project", fakeRuntimeProject, "--",
             ],
             WorkingDirectory = Environment.CurrentDirectory,
             RequestTimeout = requestTimeout,

@@ -166,7 +166,8 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Runs text through the Harness query path and returns when its activity becomes idle.
+    /// Runs text through the Harness query path, resuming a persisted session when necessary
+    /// and falling back to session/prompt for runtimes without query support.
     /// A timeout or caller cancellation does not cancel or roll back work already accepted by DSH.
     /// </summary>
     public Task<HarnessRunResult> RunAsync(
@@ -184,7 +185,8 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Runs ordered text and inline-image blocks through the Harness query path.
+    /// Runs ordered text and inline-image blocks through the Harness query path, with the
+    /// same fallback behavior as the text overload.
     /// </summary>
     public async Task<HarnessRunResult> RunAsync(
         IReadOnlyList<PromptContentBlock> contentBlocks,
@@ -221,9 +223,13 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         try
         {
             query = await SendRequestAsync<SessionQueryResult>(
-                "session/query",
-                new { sessionId, contentBlocks },
-                cancellationToken).ConfigureAwait(false);
+                "session/query", new { sessionId, contentBlocks }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessRpcException exception) when (IsExistingSessionError(exception, sessionId))
+        {
+            await ResumeSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            query = await SendRequestAsync<SessionQueryResult>(
+                "session/query", new { sessionId, contentBlocks }, cancellationToken).ConfigureAwait(false);
         }
         catch (HarnessRpcException exception) when (
             exception.Code == -32601
@@ -254,6 +260,31 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
             sessionId, messageId, subscription, onNotification, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<T> SendSessionRequestAsync<T>(
+        string method,
+        string sessionId,
+        IReadOnlyList<PromptContentBlock> contentBlocks,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new { sessionId, contentBlocks };
+        try
+        {
+            return await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessRpcException exception) when (IsExistingSessionError(exception, sessionId))
+        {
+            await ResumeSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            return await SendRequestAsync<T>(method, parameters, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static bool IsExistingSessionError(HarnessRpcException exception, string sessionId) =>
+        exception.Code == -32603
+        && string.Equals(
+            exception.RpcMessage,
+            $"session \"{sessionId}\" already exists",
+            StringComparison.Ordinal);
+
     private async Task<HarnessRunResult> RunPromptFallbackAsync(
         string sessionId,
         IReadOnlyList<PromptContentBlock> contentBlocks,
@@ -261,10 +292,8 @@ public sealed class DeepSeekHarnessClient : IAsyncDisposable
         Action<HarnessNotification>? onNotification,
         CancellationToken cancellationToken)
     {
-        var result = await SendRequestAsync<SessionPromptResult>(
-            "session/prompt",
-            new { sessionId, contentBlocks },
-            cancellationToken).ConfigureAwait(false);
+        var result = await SendSessionRequestAsync<SessionPromptResult>(
+            "session/prompt", sessionId, contentBlocks, cancellationToken).ConfigureAwait(false);
         var messageId = RequireNonEmpty(result.MessageId, "session/prompt returned no messageId.");
         return await CollectPromptResultAsync(
             sessionId, messageId, subscription, onNotification, cancellationToken).ConfigureAwait(false);

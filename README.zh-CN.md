@@ -103,18 +103,26 @@ $env:DSH_WORKSPACE = "$HOME\.dsh\workspaces\dsh-mcp"
 
 ## Streamable HTTP MCP 服务桥接
 
-仓库新增独立的 ASP.NET Core MCP 服务项目：`src/Dsh.Sdk.CSharp.McpServer`。它通过官方 MCP C# SDK 提供 `/mcp` Streamable HTTP 端点，并调用本仓库的 DSH C# SDK。当前提供 `dsh_run(prompt, conversationId?, notifyEmail?)` 工具。
+仓库新增独立的 ASP.NET Core MCP 服务项目：`src/Dsh.Sdk.CSharp.McpServer`。它通过官方 MCP C# SDK 提供 `/mcp` Streamable HTTP 端点，并调用本仓库的 DSH C# SDK。
 
 服务通过 SDK 在本机启动 DSH 可执行程序，不调用远程 DSH 服务。`DSH_HOME` 和 `DSH_PROFILE` 指定本机运行时配置与凭据。SDK 使用自身的 provider/model 默认路由，并在初始化时发送协议要求的字段；MCP 服务不再提供重复的模型配置项。
 
 MCP 项目包含 `appsettings.json`，提供非敏感的本地默认配置；ASP.NET Core 会自动加载，运行时环境变量和命令行配置可以覆盖它。`MCP_API_KEY` 不写入文件，仍须通过密钥存储或环境变量提供至少 32 个字符的随机值。不要把生产凭据提交到配置文件。
+
+长任务使用异步工具：`dsh_submit_task` 快速返回 job ID，后台 Worker 通过 SDK 执行 DSH，并将结果写入本地 SQLite。邮件开关 `Email:Enabled`（环境变量 `Email__Enabled`）默认关闭；关闭时无需邮箱/SMTP 配置，也不会发送邮件，但任务结果仍可通过 `dsh_task_status`、`dsh_task_result` 查询，host-run 结果可通过 `dsh_host_runs` 查看。`dsh_run` 保留给短任务使用。
+
+DSH 通讯日志默认记录会话 ID、提示长度、无文本助手消息的内容块类型、完成原因和回复长度；`finishReason=error` 会将任务标记为失败。设置 `DSH_MCP_LOG_DSH_MESSAGES=true` 后还会记录用户提示、助手消息正文和 DSH RPC/turn 错误详情，提示及助手消息按 `DSH_MCP_MAX_RESULT_CHARACTERS` 截断。疑似含常见凭据的提示不会记录，但检测不能识别所有秘密；请勿在提示中输入凭据，并仅在本地诊断时开启，日志可能包含隐私数据。其他通知类型在 Debug 日志级别记录。
+
+SQLite 同时维护 MCP 自己的会话记录、任务结果、可观察到的 host-run 结果和每个 `X-User-Id` 的活动会话指针。普通请求使用当前活动会话；只有 `dsh_create_session` 或 `dsh_switch_session` 会切换。需要邮件通知时才启用 `Email:Enabled`；启用后邮箱从可信网关注入的 `X-User-Email` HTTP 请求头获取，不作为模型工具参数，并须命中 `Email:AllowedRecipients` 精确 allowlist。`X-User-Id` 和 `X-User-Email` 是请求上下文，不是自行可信的身份凭证，中转网关必须先认证并覆盖客户端提供的同名 header。
+
+数据库默认放在用户本地应用数据目录，而不是仓库内；其中可能包含任务提示、结果和邮箱，须保护数据库文件及备份。SQLite 保存的是 MCP 会话映射，并不提供 DSH 会话列表，也不能保证 DSH Host 在 MCP 重启后恢复对话状态。后台监听会观察 SQLite 已登记会话的收件箱插入、助手回复和 idle 通知；当前 SDK 事件未必能证明这条 host 任务就是 Schedule，因此只是 host 活动的 best-effort 识别，需用实际安装的 DSH 版本联调验证。
 
 最小启动示例：
 
 ```powershell
 $env:MCP_API_KEY = [Convert]::ToBase64String(
     [Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-$env:ASPNETCORE_URLS = "http://127.0.0.1:8000"
+$env:ASPNETCORE_URLS = "http://127.0.0.1:5211"
 $env:DSH_EXECUTABLE = "C:\path\to\dsh.cmd"
 $env:DSH_HOME = "$HOME\.dsh"
 $env:DSH_PROFILE = "sdk"
@@ -127,7 +135,7 @@ dotnet run --project .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csp
 
 本项目提供标准 Streamable HTTP MCP 端点，可由兼容的 MCP Client 调用。设备协议适配由独立网关负责；例如 [verdure-mcp-for-xiaozhi](https://github.com/maker-community/verdure-mcp-for-xiaozhi) 用于将 MCP 服务转换为 Xiaozhi 与 Tuya 智能设备可用的服务。
 
-**首版边界：** `dsh_run` 是同步工具调用，等待 DSH 完成后返回；长任务可能超过 MCP Client 的请求超时。目前没有持久任务队列/任务 ID 轮询，也没有本项目自带的 Cron 调度器。可选邮件通知要求 SMTP 配置，收件人必须在 `Email:AllowedRecipients`（或兼容的 `DSH_EMAIL_ALLOWED_RECIPIENTS` 环境变量）明确 allowlist 中。详细环境变量、安全边界和验证方式见 [MCP 服务 README](./src/Dsh.Sdk.CSharp.McpServer/README.md)。
+**边界：** SQLite 队列适用于单机单实例测试，不是分布式作业系统。服务重启时，运行中的任务标记为 `interrupted` 且不会自动重放，以免重复执行有副作用的代码任务。邮件发送失败会记录在任务状态中。MCP 服务本身不创建 Cron；DSH Schedule 由 DSH Host 管理，MCP 仅尝试监听已登记会话的运行时通知并邮件转发可识别的完成结果。详细环境变量、安全边界和验证方式见 [MCP 服务 README](./src/Dsh.Sdk.CSharp.McpServer/README.md)。
 
 多次使用同一个 `DeepSeekHarnessClient`，并传入相同 `sessionId`，可以继续该 Session：
 
@@ -184,7 +192,7 @@ var options = new DeepSeekHarnessOptions
 
 - DSH 的 stdout 专用于 JSON-RPC 帧；SDK profile 不应把普通日志写入 stdout。
 - `RunAsync` 使用 `session/query`，并按收件箱回执和 Agent 状态收集运行过程；低层 `PromptAsync` 使用 `session/prompt`。
-- 如果旧版运行时不支持 `session/query`，`RunAsync` 会回退到 `session/prompt`，等待对应的收件箱回执和 idle 状态。回退路径不提供原生斜杠命令路由。
+- 如果运行时报告 Session 已存在，`RunAsync` 会尝试 `session/resume`，然后重试一次原请求；恢复失败会明确报错，不会静默创建新会话。如果旧版运行时不支持 `session/query`，则回退到 `session/prompt`；该回退路径不提供原生斜杠命令路由。
 - 请求超时或调用方取消只停止等待，不会取消或回滚已被 DSH 接受的任务。
 - 原始订阅会收到运行时内各个 Session 的通知；高层 `RunAsync` 仅收集目标 Session 和发现的子 Agent。
 - 未支持的服务端请求会被拒绝。操作审批必须显式启用，且只对当前操作生效；无效决定或回调异常会返回协议错误，保持 fail-closed。原生用户提问需配置 `OnUserQuestion`，除非 DSH 组合本身提供了回答器。

@@ -5,6 +5,7 @@ if (Environment.GetEnvironmentVariable("FAKE_DSH_EXIT_BEFORE_REQUEST") == "1")
     throw new InvalidOperationException("Synthetic DSH startup failure before initialize.");
 }
 
+var resumedSessions = new HashSet<string>(StringComparer.Ordinal);
 while (Console.ReadLine() is { } line)
 {
     var request = JsonNode.Parse(line)?.AsObject()
@@ -139,6 +140,19 @@ while (Console.ReadLine() is { } line)
                     break;
                 }
 
+                if (Environment.GetEnvironmentVariable("FAKE_DSH_QUERY_SESSION_EXISTS") == "1"
+                    && !resumedSessions.Contains(sessionId))
+                {
+                    RespondError(id, -32603, $"session \"{sessionId}\" already exists");
+                    break;
+                }
+
+                if (Environment.GetEnvironmentVariable("FAKE_DSH_QUERY_OTHER_SESSION_EXISTS") == "1")
+                {
+                    RespondError(id, -32603, "session \"another-session\" already exists");
+                    break;
+                }
+
                 if (Environment.GetEnvironmentVariable("FAKE_DSH_MALFORMED_QUERY") == "1")
                 {
                     Respond(id, new { kind = "unknown" });
@@ -220,6 +234,19 @@ while (Console.ReadLine() is { } line)
                     },
                 });
                 Notify("session.status", new { sessionId, status = "running" });
+                if (promptText == "test no text")
+                {
+                    Notify("session.event", new
+                    {
+                        sessionId,
+                        @event = new
+                        {
+                            type = "assistant/message",
+                            data = new { message = new { content = new[] { new { type = "tool_use" } } } },
+                        },
+                    });
+                }
+
                 if (Environment.GetEnvironmentVariable("FAKE_DSH_MALFORMED_ASSISTANT") == "1")
                 {
                     Notify("session.event", new
@@ -282,6 +309,13 @@ while (Console.ReadLine() is { } line)
             {
                 var sessionId = parameters["sessionId"]?.GetValue<string>()
                     ?? throw new InvalidDataException("sessionId is required.");
+                if (Environment.GetEnvironmentVariable("FAKE_DSH_PROMPT_SESSION_EXISTS") == "1"
+                    && !resumedSessions.Contains(sessionId))
+                {
+                    RespondError(id, -32603, $"session \"{sessionId}\" already exists");
+                    break;
+                }
+
                 var messageId = Guid.NewGuid().ToString("N");
                 Respond(id, new { messageId });
                 Notify("session.event", new
@@ -311,7 +345,6 @@ while (Console.ReadLine() is { } line)
                 Notify("session.status", new { sessionId, status = "idle" });
                 break;
             }
-        case "session/wait":
         case "session/resume":
             if (Environment.GetEnvironmentVariable("FAKE_DSH_RESUME_ERROR") == "1")
             {
@@ -319,8 +352,14 @@ while (Console.ReadLine() is { } line)
             }
             else
             {
+                var sessionId = parameters["sessionId"]?.GetValue<string>()
+                    ?? throw new InvalidDataException("sessionId is required.");
+                resumedSessions.Add(sessionId);
                 Respond(id, new { });
             }
+            break;
+        case "session/wait":
+            Respond(id, new { });
             break;
         case "session/working-directory/get":
             if (Environment.GetEnvironmentVariable("FAKE_DSH_MALFORMED_DIRECTORY") == "1")

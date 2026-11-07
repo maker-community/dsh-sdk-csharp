@@ -6,14 +6,21 @@ var builder = WebApplication.CreateBuilder(args);
 var settings = McpBridgeSettings.Load(builder.Configuration);
 
 builder.Services.AddSingleton(settings);
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<McpCallerContext>();
+builder.Services.AddSingleton<IMcpStateStore, SqliteMcpStateStore>();
 builder.Services.AddSingleton<IDshExecutionService, DshExecutionService>();
 builder.Services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
+builder.Services.AddHostedService<DshJobWorker>();
+builder.Services.AddHostedService<EmailOutboxWorker>();
+builder.Services.AddHostedService<DshHostScheduleMonitor>();
 builder.Services
     .AddMcpServer()
     .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
     .WithToolsFromAssembly();
 
 var app = builder.Build();
+await app.Services.GetRequiredService<IMcpStateStore>().InitializeAsync(CancellationToken.None);
 
 app.Use(async (context, next) =>
 {

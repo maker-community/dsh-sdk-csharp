@@ -7,8 +7,12 @@ using System.Security.Authentication;
 
 namespace Dsh.Sdk.CSharp.McpServer;
 
-public sealed class EmailNotificationService(IConfiguration configuration) : IEmailNotificationService
+public sealed class EmailNotificationService(
+    IConfiguration configuration,
+    McpBridgeSettings settings) : IEmailNotificationService
 {
+    public bool IsEnabled => settings.EmailNotificationsEnabled;
+
     private readonly string? _host = GetOptionalSetting(configuration, "Email:SmtpHost", "SMTP_HOST");
     private readonly string? _username = GetOptionalSetting(configuration, "Email:SmtpUsername", "SMTP_USERNAME");
     private readonly string? _password = GetOptionalSetting(configuration, "Email:SmtpPassword", "SMTP_PASSWORD");
@@ -28,6 +32,11 @@ public sealed class EmailNotificationService(IConfiguration configuration) : IEm
 
     public void ValidateRecipient(string recipient)
     {
+        if (!IsEnabled)
+        {
+            return;
+        }
+
         if (!_allowedRecipients.Contains(recipient))
         {
             throw new InvalidOperationException(
@@ -46,6 +55,27 @@ public sealed class EmailNotificationService(IConfiguration configuration) : IEm
         HarnessRunResult result,
         CancellationToken cancellationToken)
     {
+        var subject = $"DSH task completed ({result.FinishReason ?? "unknown"})";
+        var body = $"""
+            Session: {result.SessionId}
+            Finish reason: {result.FinishReason ?? "(not reported)"}
+
+            {result.FinalResponse}
+            """;
+        return await SendMessageAsync(recipient, subject, body, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<EmailNotificationResult> SendMessageAsync(
+        string recipient,
+        string subject,
+        string body,
+        CancellationToken cancellationToken)
+    {
+        if (!IsEnabled)
+        {
+            return new EmailNotificationResult("disabled", recipient, null);
+        }
+
         ValidateRecipient(recipient);
 
         if ((_username is null) != (_password is null))
@@ -67,16 +97,8 @@ public sealed class EmailNotificationService(IConfiguration configuration) : IEm
                 ? fromAddress
                 : new MailboxAddress(_fromName, fromAddress.Address));
             message.To.Add(MailboxAddress.Parse(recipient));
-            message.Subject = $"DSH task completed ({result.FinishReason ?? "unknown"})";
-            message.Body = new TextPart("plain")
-            {
-                Text = $"""
-                    Session: {result.SessionId}
-                    Finish reason: {result.FinishReason ?? "(not reported)"}
-
-                    {result.FinalResponse}
-                    """,
-            };
+            message.Subject = subject;
+            message.Body = new TextPart("plain") { Text = body };
 
             using var smtp = new SmtpClient();
             await smtp.ConnectAsync(host, _port, _socketOptions, cancellationToken).ConfigureAwait(false);
@@ -105,7 +127,7 @@ public sealed class EmailNotificationService(IConfiguration configuration) : IEm
             return new EmailNotificationResult(
                 "failed",
                 recipient,
-                $"DSH finished, but email delivery failed: {exception.Message}");
+                $"Email delivery failed ({exception.GetType().Name}).");
         }
     }
 

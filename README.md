@@ -83,11 +83,15 @@ The demo uses the model credentials already configured in the specified DSH home
 
 ## Streamable HTTP MCP bridge
 
-The separate [`Dsh.Sdk.CSharp.McpServer`](./src/Dsh.Sdk.CSharp.McpServer/README.md) project wraps this SDK with the official MCP C# SDK and exposes a bearer-key-protected Streamable HTTP endpoint at `/mcp`. Its `dsh_run` tool can optionally email a result to an explicitly allowlisted address. It currently runs synchronously and does not provide a durable job queue or its own scheduler.
+The separate [`Dsh.Sdk.CSharp.McpServer`](./src/Dsh.Sdk.CSharp.McpServer/README.md) project wraps this SDK with the official MCP C# SDK and exposes a bearer-key-protected Streamable HTTP endpoint at `/mcp`. It provides a short synchronous `dsh_run` tool and SQLite-backed asynchronous task, session, and email-outbox tools for clients with short timeouts.
 
 This bridge exposes a standard Streamable HTTP MCP endpoint for compatible clients. Device-specific integrations should use a separate adapter or gateway; for example, [verdure-mcp-for-xiaozhi](https://github.com/maker-community/verdure-mcp-for-xiaozhi) adapts MCP services for Xiaozhi and Tuya smart devices.
 
 The MCP service starts the local DSH executable through this repository's SDK; it does not call a remote DSH service. The SDK uses its default provider/model route and supplies the protocol-required fields during initialization; the MCP service has no duplicate model settings. The DSH home/profile supplies local runtime configuration and credentials. The MCP project includes non-secret defaults in `appsettings.json`; environment variables or command-line settings can override them at runtime. The MCP API key and SMTP credentials are not stored in that file and should be provided through a secret store or environment variables.
+
+The MCP bridge reads the caller's `X-User-Id` and `X-User-Email` from HTTP headers set by a trusted gateway. Email recipients are validated against the configured allowlist and are not model-supplied tool arguments. SQLite stores MCP-owned session mappings, active-session pointers, jobs, results, and email outbox records outside the repository by default.
+
+The bridge's async job worker waits for the SDK's observed run completion before queuing the email. A separate notification monitor also watches SDK notifications for DSH host runs on sessions registered by the bridge and emails completions it can correlate. Schedule-event correlation depends on the DSH runtime's notifications and is best-effort; the bridge does not create schedules or discover arbitrary DSH sessions. SQLite preserves app mappings but does not guarantee DSH conversation restoration after a host restart.
 
 `RunAsync` returns after the prompt's durable inbox receipt and the root Agent's idle transition. This is the runtime's observed activity interval; it is not a causal guarantee if another caller or queued input is sharing that Session. Use a separate `sessionId`, workspace, and DSH home when independent work must be isolated.
 Calls through one client are serialized per `sessionId`; separate sessions can run concurrently.
@@ -147,7 +151,7 @@ Console.WriteLine($"Queued message: {messageId}");
 
 - The protocol uses one JSON-RPC message per newline on stdin/stdout. DSH stdout is reserved for protocol frames; do not add a stdout logger to the SDK profile.
 - `RunAsync` routes input through `session/query`, matching the official SDK behavior for ordinary prompts and supported native commands.
-- When an older runtime reports that `session/query` is unavailable, `RunAsync` falls back to `session/prompt` and waits for the matching inbox receipt and idle transition. On that fallback path, slash-command routing is not provided.
+- When the runtime reports that the requested session already exists, `RunAsync` attempts `session/resume` and retries the original request once; a failed resume is reported, not silently replaced with a new session. When an older runtime reports that `session/query` is unavailable, `RunAsync` falls back to `session/prompt`; that fallback does not provide slash-command routing.
 - `PromptAsync` uses the lower-level `session/prompt` method and returns an enqueue receipt only.
 - Cancellation or timeout stops the caller's wait; it does not cancel or roll back work already accepted by DSH.
 - The runtime sends notifications for all sessions. The high-level run result filters activity to the requested Session and discovered in-process descendants; a raw subscription is intentionally unfiltered.

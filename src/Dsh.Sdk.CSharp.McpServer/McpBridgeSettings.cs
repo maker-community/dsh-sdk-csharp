@@ -8,7 +8,11 @@ public sealed class McpBridgeSettings
     public string? DshHome { get; init; }
     public string DshProfile { get; init; } = "sdk";
     public string DshWorkspace { get; init; } = Environment.CurrentDirectory;
+    public string DatabasePath { get; init; } = string.Empty;
     public int MaxPromptCharacters { get; init; } = 20_000;
+    public int MaxResultCharacters { get; init; } = 4_000;
+    public bool EmailNotificationsEnabled { get; init; }
+    public bool LogDshMessages { get; init; }
 
     public static McpBridgeSettings Load(IConfiguration configuration)
     {
@@ -23,6 +27,18 @@ public sealed class McpBridgeSettings
             configuration["DSH_MCP_MAX_PROMPT_CHARACTERS"],
             defaultValue: 20_000,
             "DSH_MCP_MAX_PROMPT_CHARACTERS");
+        var maxResultCharacters = ParsePositiveInt(
+            configuration["DSH_MCP_MAX_RESULT_CHARACTERS"],
+            defaultValue: 4_000,
+            "DSH_MCP_MAX_RESULT_CHARACTERS");
+        var emailNotificationsEnabled = ParseBoolean(
+            configuration["Email:Enabled"],
+            defaultValue: false,
+            "Email:Enabled");
+        var logDshMessages = ParseBoolean(
+            configuration["DSH_MCP_LOG_DSH_MESSAGES"],
+            defaultValue: false,
+            "DSH_MCP_LOG_DSH_MESSAGES");
 
         return new McpBridgeSettings
         {
@@ -38,7 +54,12 @@ public sealed class McpBridgeSettings
             DshProfile = configuration["DSH_PROFILE"] ?? "dsh-sdk-csharp-chat",
             DshWorkspace = Path.GetFullPath(
                 configuration["DSH_WORKSPACE"] ?? Environment.CurrentDirectory),
+            DatabasePath = Path.GetFullPath(
+                configuration["DSH_MCP_DATABASE_PATH"] ?? GetDefaultDatabasePath()),
             MaxPromptCharacters = maxPromptCharacters,
+            MaxResultCharacters = maxResultCharacters,
+            EmailNotificationsEnabled = emailNotificationsEnabled,
+            LogDshMessages = logDshMessages,
         };
     }
 
@@ -64,6 +85,35 @@ public sealed class McpBridgeSettings
 
     private static string? EmptyToNull(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private static bool ParseBoolean(string? value, bool defaultValue, string key)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        if (bool.TryParse(value, out var parsed))
+        {
+            return parsed;
+        }
+
+        throw new InvalidOperationException($"{key} must be true or false.");
+    }
+
+    private static string GetDefaultDatabasePath()
+    {
+        var dataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            dataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".local",
+                "share");
+        }
+
+        return Path.Combine(dataDirectory, "Dsh.Sdk.CSharp.McpServer", "mcp-state.db");
+    }
 
     private static string ResolveDshExecutable(string? configuredExecutable)
     {
