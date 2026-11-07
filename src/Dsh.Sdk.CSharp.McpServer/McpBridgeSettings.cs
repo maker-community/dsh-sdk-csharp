@@ -13,6 +13,7 @@ public sealed class McpBridgeSettings
     public int MaxResultCharacters { get; init; } = 4_000;
     public bool EmailNotificationsEnabled { get; init; }
     public bool LogDshMessages { get; init; }
+    public McpCaller? DefaultCaller { get; init; }
 
     public static McpBridgeSettings Load(IConfiguration configuration)
     {
@@ -39,6 +40,21 @@ public sealed class McpBridgeSettings
             configuration["DSH_MCP_LOG_DSH_MESSAGES"],
             defaultValue: false,
             "DSH_MCP_LOG_DSH_MESSAGES");
+        var defaultUserId = EmptyToNull(configuration["Caller:DefaultUserId"])?.Trim();
+        var defaultEmail = EmptyToNull(configuration["Caller:DefaultEmail"])?.Trim();
+        if ((defaultUserId is null) != (defaultEmail is null))
+        {
+            throw new InvalidOperationException(
+                "Caller:DefaultUserId and Caller:DefaultEmail must either both be set or both be omitted.");
+        }
+
+        if (defaultUserId is not null && defaultEmail is not null
+            && (!McpCallerContext.IsValidValue(defaultUserId, 128)
+                || !McpCallerContext.IsValidValue(defaultEmail, 254)))
+        {
+            throw new InvalidOperationException(
+                "Caller:DefaultUserId or Caller:DefaultEmail is invalid.");
+        }
 
         return new McpBridgeSettings
         {
@@ -60,6 +76,9 @@ public sealed class McpBridgeSettings
             MaxResultCharacters = maxResultCharacters,
             EmailNotificationsEnabled = emailNotificationsEnabled,
             LogDshMessages = logDshMessages,
+            DefaultCaller = defaultUserId is not null && defaultEmail is not null
+                ? new McpCaller(defaultUserId, defaultEmail)
+                : null,
         };
     }
 

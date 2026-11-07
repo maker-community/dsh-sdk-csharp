@@ -109,11 +109,65 @@ $env:DSH_WORKSPACE = "$HOME\.dsh\workspaces\dsh-mcp"
 
 MCP 项目包含 `appsettings.json`，提供非敏感的本地默认配置；ASP.NET Core 会自动加载，运行时环境变量和命令行配置可以覆盖它。`MCP_API_KEY` 不写入文件，仍须通过密钥存储或环境变量提供至少 32 个字符的随机值。不要把生产凭据提交到配置文件。
 
+### 发布到 Windows
+
+在装有 .NET 10 SDK 的开发电脑上，从仓库根目录发布 Windows x64 自包含版本：
+
+```powershell
+dotnet publish .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj `
+  --configuration Release `
+  --runtime win-x64 `
+  --self-contained true `
+  --output .\publish\win-x64
+```
+
+根目录下的 `publish` 已加入 Git 忽略。将发布目录复制到目标 Windows x64 电脑即可，无需单独安装 .NET 运行时。但发布包不包含官方 DSH：目标电脑仍须安装 DSH，并为运行服务的账户配置可用的 `sdk` profile、模型提供方及凭据。
+
+分发前检查发布目录：本地的 `appsettings.Development.json` 可能被复制进去，其中可能含有密钥，请勿分发该文件或生产凭据。DSH 凭据和 SQLite 数据库也应与发布文件分开保护。
+
+在目标电脑的 `appsettings.json` 中添加或修改以下非敏感配置，保留文件中的其他配置项：
+
+```json
+{
+  "urls": "http://127.0.0.1:5211",
+  "DSH_PROFILE": "sdk",
+  "DSH_WORKSPACE": "C:\\DshWorkspace",
+  "DSH_MCP_LOG_DSH_MESSAGES": false
+}
+```
+
+工作目录应由服务账户访问，且范围适当隔离；DSH 使用服务账户的权限运行。未配置 `DSH_HOME` 时默认使用当前用户的 `.dsh`，未配置 `DSH_EXECUTABLE` 时程序会自动查找；若目标电脑使用其他路径，请在目标电脑上配置。JSON 路径不会展开 `$HOME` 等环境变量。环境变量和命令行参数会覆盖 JSON 配置。
+
+在目标电脑通过密钥存储或环境变量提供至少 32 个字符的随机 `MCP_API_KEY`，客户端必须使用同一密钥。以下为本地交互式启动示例：
+
+```powershell
+Set-Location C:\path\to\published\win-x64
+$env:MCP_API_KEY = Read-Host "Enter the MCP API key"
+.\Dsh.Sdk.CSharp.McpServer.exe
+```
+
+`Read-Host` 会显示输入内容；无人值守或生产环境应使用合适的密钥存储。默认环境为 Production。仅在开发时，如需加载目标电脑上单独配置的 `appsettings.Development.json`，可使用 `.\Dsh.Sdk.CSharp.McpServer.exe --environment Development`；环境专属配置覆盖基础配置，环境变量覆盖两者。
+
+启动后可用 `Invoke-RestMethod http://127.0.0.1:5211/health` 检查服务是否存活，再通过已认证的 MCP 客户端验证 DSH 执行。`/health` 成功不代表 DSH 监控器已连接。该地址仅供目标电脑本机访问，远程访问应使用经过适当保护的网关。更多配置见 [MCP Server README](./src/Dsh.Sdk.CSharp.McpServer/README.md#publish-for-windows)。
+
 长任务使用异步工具：`dsh_submit_task` 快速返回 job ID，后台 Worker 通过 SDK 执行 DSH，并将结果写入本地 SQLite。邮件开关 `Email:Enabled`（环境变量 `Email__Enabled`）默认关闭；关闭时无需邮箱/SMTP 配置，也不会发送邮件，但任务结果仍可通过 `dsh_task_status`、`dsh_task_result` 查询，host-run 结果可通过 `dsh_host_runs` 查看。`dsh_run` 保留给短任务使用。
 
 DSH 通讯日志默认记录会话 ID、提示长度、无文本助手消息的内容块类型、完成原因和回复长度；`finishReason=error` 会将任务标记为失败。设置 `DSH_MCP_LOG_DSH_MESSAGES=true` 后还会记录用户提示、助手消息正文和 DSH RPC/turn 错误详情，提示及助手消息按 `DSH_MCP_MAX_RESULT_CHARACTERS` 截断。疑似含常见凭据的提示不会记录，但检测不能识别所有秘密；请勿在提示中输入凭据，并仅在本地诊断时开启，日志可能包含隐私数据。其他通知类型在 Debug 日志级别记录。
 
-SQLite 同时维护 MCP 自己的会话记录、任务结果、可观察到的 host-run 结果和每个 `X-User-Id` 的活动会话指针。普通请求使用当前活动会话；只有 `dsh_create_session` 或 `dsh_switch_session` 会切换。需要邮件通知时才启用 `Email:Enabled`；启用后邮箱从可信网关注入的 `X-User-Email` HTTP 请求头获取，不作为模型工具参数，并须命中 `Email:AllowedRecipients` 精确 allowlist。`X-User-Id` 和 `X-User-Email` 是请求上下文，不是自行可信的身份凭证，中转网关必须先认证并覆盖客户端提供的同名 header。
+SQLite 同时维护 MCP 自己的会话记录、任务结果、可观察到的 host-run 结果和每个调用者的活动会话指针。普通请求使用当前活动会话；只有 `dsh_create_session` 或 `dsh_switch_session` 会切换。默认使用可信网关注入的 `X-User-Id` 和 `X-User-Email`；它们不是自行可信的身份凭证，中转网关必须先认证并覆盖客户端提供的同名 header。
+
+也可在本地配置固定调用者，优先使用配置并忽略两个请求头：
+
+```json
+{
+  "Caller": {
+    "DefaultUserId": "local-user",
+    "DefaultEmail": "recipient@example.com"
+  }
+}
+```
+
+这是配置片段，保留文件中的其他设置。两项必须同时填写或同时留空；只填写一项或填写无效值会导致启动失败。也可使用 `Caller__DefaultUserId` 和 `Caller__DefaultEmail` 环境变量。启用固定调用者后，所有通过认证的请求共享该用户的 MCP 会话和任务，不能用于区分用户。启用邮件通知时仍须配置 SMTP，并将该邮箱加入 `Email:AllowedRecipients` 精确允许名单；收件人不是模型工具参数。已排队任务和邮件保留原收件人，现有会话的邮箱也只有后续会话操作才会更新；更改默认值不会重写历史数据。详见 [MCP Server README](./src/Dsh.Sdk.CSharp.McpServer/README.md#optional-fixed-local-caller)。
 
 数据库默认放在用户本地应用数据目录，而不是仓库内；其中可能包含任务提示、结果和邮箱，须保护数据库文件及备份。SQLite 保存的是 MCP 会话映射，并不提供 DSH 会话列表，也不能保证 DSH Host 在 MCP 重启后恢复对话状态。后台监听会观察 SQLite 已登记会话的收件箱插入、助手回复和 idle 通知；当前 SDK 事件未必能证明这条 host 任务就是 Schedule，因此只是 host 活动的 best-effort 识别，需用实际安装的 DSH 版本联调验证。
 

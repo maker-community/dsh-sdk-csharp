@@ -23,7 +23,7 @@ The service launches the configured local DSH executable through the C# SDK; it 
 
 The ConsoleChat example passes `DSH_EXECUTABLE`, `DSH_HOME`, `DSH_PROFILE`, and `DSH_WORKSPACE` explicitly. The MCP host has its own environment/PATH. A closed stdin pipe means the DSH child exited before accepting the SDK handshake; use the bridge startup log to compare the resolved executable, home, profile, and workspace, then inspect the child stderr included by the latest SDK build.
 
-The tools require an `X-User-Id` HTTP header from the authenticated gateway. When email notifications are enabled, async submission also requires `X-User-Email`, validated against `Email:AllowedRecipients`; it is not a model-controlled tool argument. The MCP API key is shared-key authentication, not per-user identity. Only a trusted gateway that authenticates a caller should set these identity headers; do not forward arbitrary client-supplied values as trusted identity.
+By default, the tools require an `X-User-Id` HTTP header from the authenticated gateway. When email notifications are enabled, async submission also requires `X-User-Email`, validated against `Email:AllowedRecipients`; it is not a model-controlled tool argument. Alternatively, configure a fixed local caller as described below. The MCP API key is shared-key authentication, not per-user identity. When using headers, only a trusted gateway that authenticates a caller should set them; do not forward arbitrary client-supplied values as trusted identity.
 
 The host-run monitor observes SDK notifications for sessions registered in SQLite. It persists a host-run result when it sees an inbox insertion, assistant response, and idle transition for a known session with no MCP job running, and enqueues email only when notifications are enabled. The current SDK event shape does not identify whether an out-of-band inbox message came specifically from DSH Schedule or another host-side source, so this is best-effort host-activity detection, not a durable scheduler. Validate it against the installed DSH version; it cannot discover sessions that were never registered by this MCP service.
 
@@ -59,6 +59,64 @@ $env:DSH_WORKSPACE = "$HOME\.dsh\workspaces\dsh-mcp"
 ```
 
 `DSH_EXECUTABLE` and `DSH_PROFILE` are independent: matching the home alone does not make the MCP bridge use the same CLI/profile as ConsoleChat. When DSH exits before handshake, the C# SDK reports its exit code and recent stderr to help identify an invalid executable, profile, or startup failure.
+
+### Optional fixed local caller
+
+For a single shared local identity, set both values in `appsettings.json` or an environment-specific settings file:
+
+```json
+{
+  "Caller": {
+    "DefaultUserId": "local-user",
+    "DefaultEmail": "recipient@example.com"
+  }
+}
+```
+
+This is a configuration fragment; keep the other settings. The equivalent environment variables are `Caller__DefaultUserId` and `Caller__DefaultEmail`. Both values must be nonempty or both omitted; a partial or invalid pair prevents startup. When configured, all MCP tools use this identity and ignore both request headers, even if supplied. If both values are omitted, the existing gateway-header behavior remains unchanged.
+
+All authenticated callers then share the same MCP session and task ownership; this is not per-user authentication or isolation. Use this mode only when that sharing is intended. If email is enabled, configure SMTP and include the default email in `Email:AllowedRecipients`; the allowlist still applies. Existing queued jobs and outbox messages retain their captured recipients, and stored sessions retain their email until updated by a later session operation; changing the defaults does not rewrite existing data.
+
+### Publish for Windows
+
+From the repository root on a machine with the .NET 10 SDK, publish a self-contained Windows x64 build:
+
+```powershell
+dotnet publish .\src\Dsh.Sdk.CSharp.McpServer\Dsh.Sdk.CSharp.McpServer.csproj `
+  --configuration Release `
+  --runtime win-x64 `
+  --self-contained true `
+  --output .\publish\win-x64
+```
+
+The root `publish` directory is ignored by Git. Copy the published directory to the target Windows x64 machine; it does not need a separate .NET runtime. The official DSH CLI is not included: install it on the target machine and configure a working `sdk` profile, model provider, and credentials for the account running the service.
+
+Before distributing the directory, inspect it for sensitive files. Publishing can copy a local `appsettings.Development.json`, which may contain secrets; do not distribute it or production credentials. Keep DSH credentials and the SQLite database separate from the published files.
+
+Edit the target machine's `appsettings.json` to add or change these non-secret settings, keeping the other existing settings:
+
+```json
+{
+  "urls": "http://127.0.0.1:5211",
+  "DSH_PROFILE": "sdk",
+  "DSH_WORKSPACE": "C:\\DshWorkspace",
+  "DSH_MCP_LOG_DSH_MESSAGES": false
+}
+```
+
+Create or select an appropriately isolated workspace that the service account can access. DSH runs with that account's permissions. If omitted, `DSH_HOME` defaults to the current user's `.dsh` directory and `DSH_EXECUTABLE` is discovered as described above; configure explicit paths on the target machine if necessary. JSON paths do not expand PowerShell or Windows environment variables. Environment variables and command-line settings override the JSON configuration.
+
+Provide a random `MCP_API_KEY` of at least 32 characters through a secret store or environment variable on the target machine. For a local PowerShell session, retrieve the existing key securely and set it before starting the service; MCP clients must use the same key. Start from the published directory:
+
+```powershell
+Set-Location C:\path\to\published\win-x64
+$env:MCP_API_KEY = Read-Host "Enter the MCP API key"
+.\Dsh.Sdk.CSharp.McpServer.exe
+```
+
+`Read-Host` displays the entered value; use a suitable secret store for unattended or production deployments. To load a separately provisioned local `appsettings.Development.json` for development only, start the executable with `--environment Development`; the default is Production. Environment-specific settings override `appsettings.json`, while environment variables override both.
+
+Check liveness with `Invoke-RestMethod http://127.0.0.1:5211/health`, then use an authenticated MCP client to verify DSH execution. A successful health response does not prove that the DSH monitor connected. The loopback URL is local to the target machine; use an appropriately secured gateway for remote access.
 
 The API key is required and must be at least 32 characters. The service never logs or returns it. Every request to `/mcp` must include:
 
@@ -104,7 +162,7 @@ This project exposes Streamable HTTP at `/mcp`; VS Code connects to the running 
 }
 ```
 
-Enter the same API key configured for the service when VS Code prompts, plus a stable test user/device ID and an allowlisted email. In production, the Xiaozhi gateway must authenticate the device and inject or overwrite both identity headers; do not trust arbitrary client-provided headers. Configure its MCP client to use `https://<host>/mcp` with the bearer header.
+Enter the same API key configured for the service when VS Code prompts. In header mode, also provide a stable test user/device ID and an allowlisted email; in fixed local caller mode, the identity headers are ignored and may be omitted. In production header mode, the Xiaozhi gateway must authenticate the device and inject or overwrite both identity headers; do not trust arbitrary client-provided headers. Configure its MCP client to use `https://<host>/mcp` with the bearer header.
 
 The bridge logs the resolved DSH executable, home, profile, workspace, provider, and model at startup. These values contain no API key. If DSH exits before the SDK handshake, the SDK error includes the child exit code and recent stderr.
 
@@ -134,11 +192,11 @@ In VS Code, start `dsh-csharp-local` from the MCP server list and enter the same
 - `dsh_submit_task(prompt)` — persists a job and returns its `jobId` immediately. The worker runs it in the caller's active session. When email is disabled, the full result remains available in local task history.
 - `dsh_task_status(jobId)` — returns concise state, a bounded preview, and email-delivery status (`disabled` when notifications are off).
 - `dsh_task_result(jobId, startIndex?, maxCharacters?)` — returns a bounded result slice.
-- `dsh_current_session()` / `dsh_list_sessions()` — inspect MCP-owned sessions for the current `X-User-Id`.
+- `dsh_current_session()` / `dsh_list_sessions()` — inspect MCP-owned sessions for the current caller identity.
 - `dsh_create_session(title)` / `dsh_switch_session(sessionId)` — explicitly create or switch the active session.
 - `dsh_host_runs(count?)` — reads recent DSH host-originated results observed on this caller's registered sessions, including when email is disabled.
 
-Email notifications are controlled by `Email:Enabled` (`Email__Enabled` environment variable) and default to `false`. With email disabled, async submission does not require `X-User-Email`, no SMTP messages are sent, and task/host results are still stored in SQLite and available through the status/result/host-run tools. Set `Email__Enabled=true` to enable delivery. When enabled, the caller's email comes from `X-User-Email` and must exactly match `Email:AllowedRecipients` (or the legacy `DSH_EMAIL_ALLOWED_RECIPIENTS` setting). It is captured when the job is submitted; no recipient parameter is exposed to the model.
+Email notifications are controlled by `Email:Enabled` (`Email__Enabled` environment variable) and default to `false`. With email disabled, async submission does not require `X-User-Email`, no SMTP messages are sent, and task/host results are still stored in SQLite and available through the status/result/host-run tools. Set `Email__Enabled=true` to enable delivery. When enabled, the caller's email comes from the fixed local caller if configured, otherwise from `X-User-Email`, and must exactly match `Email:AllowedRecipients` (or the legacy `DSH_EMAIL_ALLOWED_RECIPIENTS` setting). It is captured when the job is submitted; no recipient parameter is exposed to the model.
 
 DSH communication logs include session ID, prompt length, assistant message block types when there is no text, finish reason, and response length. A DSH `finishReason` of `error` is recorded as a failed job rather than successful completion. When `DSH_MCP_LOG_DSH_MESSAGES=true`, prompt text, assistant text, and DSH RPC/turn failure details may also be logged; prompt and assistant text are truncated to `DSH_MCP_MAX_RESULT_CHARACTERS`. Prompts matching common credential indicators are omitted, but this detection cannot identify every secret. Enable this only for local diagnostics and never include credentials in a prompt; logs may contain private information. Other notification types are logged at Debug level.
 
@@ -162,6 +220,8 @@ The background worker persists jobs and an email outbox, but it is a single-proc
 | `DSH_MCP_MAX_PROMPT_CHARACTERS` | `20000` | Maximum accepted prompt length |
 | `DSH_MCP_MAX_RESULT_CHARACTERS` | `4000` | Maximum characters in synchronous or paged MCP result responses |
 | `DSH_MCP_LOG_DSH_MESSAGES` | `false` | Include bounded prompt/assistant text and error details in DSH communication logs |
+| `Caller__DefaultUserId` | Empty | Fixed shared caller ID; must be configured together with `Caller__DefaultEmail` |
+| `Caller__DefaultEmail` | Empty | Fixed shared caller email; must be configured together with `Caller__DefaultUserId` and be allowlisted when email is enabled |
 | `Email__Enabled` | `false` | Enable asynchronous SMTP notifications; restarting the service is required after changing it |
 | `Email__SmtpHost` (`SMTP_HOST` legacy) | Empty | SMTP host |
 | `Email__SmtpPort` (`SMTP_PORT` legacy) | `587` | SMTP port |
@@ -180,6 +240,7 @@ The checked-in `appsettings.json` groups email settings under `Email`, matching 
 - Do not add a generic shell/command MCP tool or automatically grant DSH approvals. The C# SDK's approval callback is fail-closed unless an explicit handler is configured.
 - The email allowlist prevents the model from choosing arbitrary recipients, but it does not replace caller authentication or per-user authorization.
 - The MCP API key is shared-key authentication, not OAuth or multi-tenant identity. For multiple users/devices, put a gateway with per-principal authorization in front.
+- A fixed local caller intentionally shares MCP session and task ownership across all authenticated requests; use gateway headers instead when callers need separate identities.
 
 ## Verify
 

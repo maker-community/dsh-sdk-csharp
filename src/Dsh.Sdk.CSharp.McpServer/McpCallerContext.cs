@@ -2,12 +2,19 @@ namespace Dsh.Sdk.CSharp.McpServer;
 
 public sealed record McpCaller(string UserId, string Email);
 
-public sealed class McpCallerContext(IHttpContextAccessor httpContextAccessor)
+public sealed class McpCallerContext(
+    IHttpContextAccessor httpContextAccessor,
+    McpBridgeSettings settings)
 {
     public McpCaller GetRequired(bool requireEmail = false)
     {
         var context = httpContextAccessor.HttpContext
             ?? throw new InvalidOperationException("The MCP caller context is unavailable.");
+        if (settings.DefaultCaller is { } defaultCaller)
+        {
+            return defaultCaller;
+        }
+
         var userId = ReadRequiredHeader(context, "X-User-Id", 128);
         var email = ReadOptionalHeader(context, "X-User-Email", 254);
         if (requireEmail && email is null)
@@ -22,9 +29,7 @@ public sealed class McpCallerContext(IHttpContextAccessor httpContextAccessor)
     private static string ReadRequiredHeader(HttpContext context, string name, int maximumLength)
     {
         var value = context.Request.Headers[name].ToString().Trim();
-        if (string.IsNullOrWhiteSpace(value)
-            || value.Length > maximumLength
-            || value.Any(char.IsControl))
+        if (!IsValidValue(value, maximumLength))
         {
             throw new InvalidOperationException(
                 $"The authenticated MCP gateway must provide a valid {name} header.");
@@ -41,11 +46,16 @@ public sealed class McpCallerContext(IHttpContextAccessor httpContextAccessor)
             return null;
         }
 
-        if (value.Length > maximumLength || value.Any(char.IsControl))
+        if (!IsValidValue(value, maximumLength))
         {
             throw new InvalidOperationException($"The {name} header is invalid.");
         }
 
         return value;
     }
+
+    internal static bool IsValidValue(string value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length <= maximumLength
+        && !value.Any(char.IsControl);
 }

@@ -93,6 +93,42 @@ public sealed class McpBridgeSettingsTests
         Assert.True(LoadSettings(("DSH_MCP_LOG_DSH_MESSAGES", "true")).LogDshMessages);
     }
 
+    [Fact]
+    public void Load_OptionalDefaultCallerIsTrimmed()
+    {
+        Assert.Null(LoadSettings().DefaultCaller);
+        Assert.Null(LoadSettings(
+            ("Caller:DefaultUserId", " "),
+            ("Caller:DefaultEmail", "")).DefaultCaller);
+        var settings = LoadSettings(
+            ("Caller:DefaultUserId", " local-user "),
+            ("Caller:DefaultEmail", " local@example.com "));
+
+        Assert.Equal(new McpCaller("local-user", "local@example.com"), settings.DefaultCaller);
+    }
+
+    [Theory]
+    [InlineData("local-user", "")]
+    [InlineData("", "local@example.com")]
+    [InlineData("local-user", " ")]
+    public void Load_RejectsPartialDefaultCaller(string userId, string email)
+    {
+        var error = Assert.Throws<InvalidOperationException>(() => LoadSettings(
+            ("Caller:DefaultUserId", userId),
+            ("Caller:DefaultEmail", email)));
+        Assert.Contains("must either both be set", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Load_RejectsInvalidDefaultCallerValues(bool invalidUserId)
+    {
+        Assert.Throws<InvalidOperationException>(() => LoadSettings(
+            ("Caller:DefaultUserId", invalidUserId ? new string('x', 129) : "local-user"),
+            ("Caller:DefaultEmail", invalidUserId ? "local@example.com" : "bad\nemail")));
+    }
+
     private static McpBridgeSettings LoadSettings(
         params (string Key, string Value)[] additionalSettings)
     {

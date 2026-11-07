@@ -6,4 +6,5 @@
 *.suo
 TestResults/
 artifacts/
+/publish/
 /src/Dsh.Sdk.CSharp.McpServer/appsettings.Development.json

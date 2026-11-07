@@ -3,6 +3,7 @@ using Dsh.Sdk.CSharp.McpServer;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -24,7 +25,7 @@ public sealed class McpAsyncWorkflowTests
         var callerContext = new McpCallerContext(new HttpContextAccessor
         {
             HttpContext = httpContext,
-        });
+        }, new McpBridgeSettings { ApiKey = new string('k', 32) });
 
         var caller = callerContext.GetRequired();
 
@@ -38,7 +39,7 @@ public sealed class McpAsyncWorkflowTests
         var callerContext = new McpCallerContext(new HttpContextAccessor
         {
             HttpContext = new DefaultHttpContext(),
-        });
+        }, new McpBridgeSettings { ApiKey = new string('k', 32) });
 
         Assert.Throws<InvalidOperationException>(() => callerContext.GetRequired());
     }
@@ -51,13 +52,119 @@ public sealed class McpAsyncWorkflowTests
         var callerContext = new McpCallerContext(new HttpContextAccessor
         {
             HttpContext = httpContext,
-        });
+        }, new McpBridgeSettings { ApiKey = new string('k', 32) });
 
         var caller = callerContext.GetRequired();
 
         Assert.Equal("xiaozhi-device-1", caller.UserId);
         Assert.Empty(caller.Email);
         Assert.Throws<InvalidOperationException>(() => callerContext.GetRequired(requireEmail: true));
+    }
+
+    [Fact]
+    public void CallerContext_ConfiguredIdentityOverridesEvenInvalidHeaders()
+    {
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Headers["X-User-Id"] = new string('x', 129);
+        httpContext.Request.Headers["X-User-Email"] = new string('y', 255);
+        var callerContext = new McpCallerContext(
+            new HttpContextAccessor { HttpContext = httpContext },
+            new McpBridgeSettings
+            {
+                ApiKey = new string('k', 32),
+                DefaultCaller = new McpCaller("local-user", "local@example.com"),
+            });
+
+        Assert.Equal(new McpCaller("local-user", "local@example.com"),
+            callerContext.GetRequired(requireEmail: true));
+        httpContext.Request.Headers.Clear();
+        Assert.Equal(new McpCaller("local-user", "local@example.com"),
+            callerContext.GetRequired(requireEmail: true));
+    }
+
+    [Fact]
+    public void CallerContext_DependencyInjectionResolvesConfiguredIdentity()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["MCP_API_KEY"] = new string('k', 32),
+                ["DSH_EXECUTABLE"] = Path.Combine(Path.GetTempPath(), "dsh-test"),
+                ["Caller:DefaultUserId"] = "local-user",
+                ["Caller:DefaultEmail"] = "local@example.com",
+            }).Build();
+        var services = new ServiceCollection();
+        services.AddSingleton(McpBridgeSettings.Load(configuration));
+        services.AddHttpContextAccessor();
+        services.AddSingleton<McpCallerContext>();
+        using var provider = services.BuildServiceProvider();
+        provider.GetRequiredService<IHttpContextAccessor>().HttpContext = new DefaultHttpContext();
+
+        var caller = provider.GetRequiredService<McpCallerContext>().GetRequired(requireEmail: true);
+
+        Assert.Equal(new McpCaller("local-user", "local@example.com"), caller);
+    }
+
+    [Fact]
+    public async Task ConfiguredCaller_UsesLocalSessionAndAllowlistedRecipientForTasks()
+    {
+        var (directory, store) = await CreateStoreAsync();
+        try
+        {
+            var settings = new McpBridgeSettings
+            {
+                ApiKey = new string('k', 32),
+                DefaultCaller = new McpCaller("local-user", "local@example.com"),
+                EmailNotificationsEnabled = true,
+            };
+            var context = new DefaultHttpContext();
+            context.Request.Headers["X-User-Id"] = "other-user";
+            context.Request.Headers["X-User-Email"] = "other@example.com";
+            var callerContext = new McpCallerContext(
+                new HttpContextAccessor { HttpContext = context }, settings);
+            var emailConfiguration = new ConfigurationBuilder().AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Email:SmtpHost"] = "smtp.example.com",
+                    ["Email:FromEmail"] = "sender@example.com",
+                    ["Email:AllowedRecipients"] = "local@example.com",
+                }).Build();
+            var email = new EmailNotificationService(emailConfiguration, settings);
+
+            var sessionJson = await DshSessionTools.CurrentAsync(store, callerContext);
+            using var session = JsonDocument.Parse(sessionJson);
+            var sessionId = session.RootElement.GetProperty("sessionId").GetString();
+            var response = await DshAsyncTools.SubmitAsync(
+                "test task", store, callerContext, email, settings);
+            using var submission = JsonDocument.Parse(response);
+            Assert.Equal(sessionId, submission.RootElement.GetProperty("sessionId").GetString());
+            var job = await store.TryClaimNextJobAsync(CancellationToken.None);
+            Assert.NotNull(job);
+            Assert.Equal("local@example.com", job.NotificationEmail);
+            Assert.NotNull(await store.GetJobAsync("local-user", job.Id, CancellationToken.None));
+            Assert.Null(await store.GetJobAsync("other-user", job.Id, CancellationToken.None));
+            await store.CompleteJobAsync(job.Id,
+                new HarnessRunResult(job.DshSessionId, "result", "completed", [], []),
+                CancellationToken.None);
+            var message = await store.TryClaimNextEmailAsync(CancellationToken.None);
+            Assert.NotNull(message);
+            Assert.Equal("local@example.com", message.Recipient);
+
+            var rejectedEmail = new EmailNotificationService(
+                new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Email:SmtpHost"] = "smtp.example.com",
+                    ["Email:FromEmail"] = "sender@example.com",
+                    ["Email:AllowedRecipients"] = "other@example.com",
+                }).Build(), settings);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => DshAsyncTools.SubmitAsync(
+                "not allowlisted", store, callerContext, rejectedEmail, settings));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -204,7 +311,7 @@ public sealed class McpAsyncWorkflowTests
         var callerContext = new McpCallerContext(new HttpContextAccessor
         {
             HttpContext = httpContext,
-        });
+        }, new McpBridgeSettings { ApiKey = new string('k', 32) });
         var email = new FakeEmailNotificationService(isEnabled: false);
         try
         {
